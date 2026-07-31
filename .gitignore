@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.ultra/
+
+# 모델 가중치/엔진 — 재생성·자동다운로드 가능하고 엔진은 이 기기 전용이라 커밋 제외
+#   .pt : YOLO()가 없으면 자동 다운로드,  .engine/.onnx : export_trt.sh 로 재생성
+*.pt
+*.onnx
+*.engine
+
+# 실행 산출물 — 벤치 결과 JSON(대시보드가 읽음)만 남기고 이미지/영상은 제외
+outputs/*
+!outputs/trt_compare/
+outputs/trt_compare/*
+!outputs/trt_compare/*.json

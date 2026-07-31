@@ -1,0 +1,22 @@
+{
+  "task": "detect",
+  "model": "yolo11n.pt",
+  "imgsz": 640,
+  "device": "0",
+  "input": "input/sample.jpg",
+  "repeat": 60,
+  "energy": {
+    "frames": 60,
+    "seconds": 3.982,
+    "fps": 15.07,
+    "avg_power_W": 6.742,
+    "peak_power_W": 7.051,
+    "energy_J": 25.796,
+    "mJ_per_frame": 429.9,
+    "frames_per_joule": 2.326,
+    "samples": 37,
+    "idle_power_W": 5.225,
+    "dynamic_power_W": 1.517,
+    "dynamic_mJ_per_frame": 100.7
+  }
+}

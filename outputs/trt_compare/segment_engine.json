@@ -1,0 +1,22 @@
+{
+  "task": "segment",
+  "model": "yolo11n-seg.engine",
+  "imgsz": 640,
+  "device": "0",
+  "input": "input/sample.jpg",
+  "repeat": 60,
+  "energy": {
+    "frames": 60,
+    "seconds": 4.331,
+    "fps": 13.85,
+    "avg_power_W": 6.316,
+    "peak_power_W": 6.417,
+    "energy_J": 26.189,
+    "mJ_per_frame": 436.5,
+    "frames_per_joule": 2.291,
+    "samples": 40,
+    "idle_power_W": 5.109,
+    "dynamic_power_W": 1.206,
+    "dynamic_mJ_per_frame": 87.1
+  }
+}
