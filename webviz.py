@@ -51,6 +51,7 @@ TRT_DIR = OUTDIR / "trt_compare"
 ACCENT = "#00b4d8"
 IMG_EXT = perception.IMG_EXT
 VID_EXT = perception.VID_EXT
+IMGSZ = 640   # 벤치 운용점으로 고정(콤팩트화를 위해 UI 노출 안 함)
 
 # ── 모델/유휴전력 캐시 ────────────────────────────────────────────────────
 _models = {}
@@ -200,19 +201,18 @@ def _image_semantic(image, domain, repeat, measure):
 
 
 # ── 이미지 추론 ───────────────────────────────────────────────────────────
-def run_image(image, task, fmt, domain, dev, imgsz, conf, repeat, classes_text, measure):
+def run_image(image, task, domain, conf, repeat, classes_text, measure):
     if image is None:
         raise gr.Error("이미지를 업로드하세요.")
-    device.set_mode(dev)
+    device.set_mode("auto")               # 젯슨=GPU 자동, 그 외 CPU
     if task == "semantic":
         return _image_semantic(image, domain, repeat, measure)
-    # YOLO 경로 — CPU 에서는 TensorRT 엔진이 안 돌아가므로 .pt 로 자동 전환
-    if not device.is_cuda() and fmt == "engine":
-        fmt = "pt"
+    # YOLO 경로 — 항상 TensorRT FP16 엔진(저전력). CPU면 엔진 미지원이라 자동 .pt.
+    fmt = "engine" if device.is_cuda() else "pt"
     path = model_path(task, fmt)
     model = get_model(path)
     classes = _resolve_classes(model, classes_text)
-    args = _args(task, conf, imgsz, classes, _yolo_device())
+    args = _args(task, conf, IMGSZ, classes, _yolo_device())
 
     # gradio는 RGB → 파이프라인(cv2)은 BGR
     bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
@@ -239,8 +239,8 @@ def run_image(image, task, fmt, domain, dev, imgsz, conf, repeat, classes_text, 
     if measure:
         r = pm.report(n_frames=reps, idle_watt=idle_w)
         report_md = _report_md(r) + f"\n\n<sub>동일 프레임 {reps}회 반복추론 평균 · " \
-                                    f"{fmt_label(fmt)} · imgsz {int(imgsz)} · {device.summary()}</sub>"
-        fig = _power_fig(pm, idle_w, f"{task} · {fmt_label(fmt)} · imgsz{int(imgsz)}")
+                                    f"{fmt_label(fmt)} · imgsz {IMGSZ} · {device.summary()}</sub>"
+        fig = _power_fig(pm, idle_w, f"{task} · {fmt_label(fmt)} · imgsz{IMGSZ}")
     else:
         report_md = "_빠른 미리보기 (전력 계측 꺼짐)_"
         fig = _power_fig(None, None, "energy measurement off")
@@ -249,9 +249,9 @@ def run_image(image, task, fmt, domain, dev, imgsz, conf, repeat, classes_text, 
 
 
 # ── 영상 추론 ─────────────────────────────────────────────────────────────
-def _video_semantic(video, domain, stride, max_frames, measure, progress):
-    stride = max(int(stride), 1)
-    max_frames = int(max_frames)
+# 영상은 항상 "모든 프레임(stride 없음) · 전체 길이(잘림 없음) · 원본 fps 로 기록"
+# → 결과 영상이 입력과 같은 길이로, 끊김 없이 매끄럽게 재생된다.
+def _video_semantic(video, domain, measure, progress):
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
         raise gr.Error(f"영상을 열 수 없습니다: {video}")
@@ -260,32 +260,26 @@ def _video_semantic(video, domain, stride, max_frames, measure, progress):
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-    planned = min(total // stride, max_frames) if (total and max_frames) else (total // stride or max_frames)
     out_path = OUTDIR / f"webviz_semantic_{domain}.mp4"
-    out_fps = max(src_fps / stride, 1.0)
-    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"avc1"), out_fps, (w, h))
+    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"avc1"), src_fps, (w, h))
     if not writer.isOpened():
-        writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), out_fps, (w, h))
+        writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), src_fps, (w, h))
     idle_w = get_idle() if measure else None
     from collections import Counter
     tally = Counter()
     hud = f"semantic | {domain} | {device.name()}"
     pm = PowerMeter()
-    n, fi, warmed, last_seg = 0, -1, False, None
+    n, warmed = 0, False
     while True:
         ok, frame = cap.read()
         if not ok:
             break
-        fi += 1
-        if fi % stride != 0:
-            continue
         if not warmed:
             semantic.infer_seg(proc, model, frame); device.sync()
             warmed = True
             if measure:
                 pm.start()
         seg = semantic.infer_seg(proc, model, frame)
-        last_seg = seg
         for name_, _pct in semantic.class_summary(seg, id2label):
             tally[name_] += 1
         ann = semantic.overlay(frame, seg, domain, id2label)
@@ -293,10 +287,8 @@ def _video_semantic(video, domain, stride, max_frames, measure, progress):
         cv2.putText(ann, hud, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         writer.write(ann)
         n += 1
-        progress(min(n / planned, 1.0) if planned else (n % 100) / 100,
-                 desc=f"semantic {n}{'/' + str(planned) if planned else ''} 프레임")
-        if max_frames and n >= max_frames:
-            break
+        progress(min(n / total, 1.0) if total else (n % 100) / 100,
+                 desc=f"semantic {n}{'/' + str(total) if total else ''} 프레임")
     device.sync()
     if measure:
         pm.stop()
@@ -306,7 +298,7 @@ def _video_semantic(video, domain, stride, max_frames, measure, progress):
     if measure and n:
         r = pm.report(n_frames=n, idle_watt=idle_w)
         report_md = _report_md(r) + _miou_note(r) + \
-            f"\n\n<sub>영상 {n}프레임 · stride {stride} · SegFormer-B0 · {domain} · {device.summary()}</sub>"
+            f"\n\n<sub>영상 {n}프레임(전체) · SegFormer-B0 · {domain} · {device.summary()}</sub>"
         fig = _power_fig(pm, idle_w, f"semantic video · {domain} · {device.name()}")
     else:
         report_md = "_전력 계측 꺼짐_"
@@ -314,21 +306,17 @@ def _video_semantic(video, domain, stride, max_frames, measure, progress):
     return str(out_path), summary, report_md, fig
 
 
-def run_video(video, task, fmt, domain, dev, imgsz, conf, stride, max_frames, classes_text,
-              measure, progress=gr.Progress()):
+def run_video(video, task, domain, conf, classes_text, measure, progress=gr.Progress()):
     if not video:
         raise gr.Error("영상을 업로드하세요.")
-    device.set_mode(dev)
+    device.set_mode("auto")
     if task == "semantic":
-        return _video_semantic(video, domain, stride, max_frames, measure, progress)
-    if not device.is_cuda() and fmt == "engine":
-        fmt = "pt"
+        return _video_semantic(video, domain, measure, progress)
+    fmt = "engine" if device.is_cuda() else "pt"
     path = model_path(task, fmt)
     model = get_model(path)
     classes = _resolve_classes(model, classes_text)
-    args = _args(task, conf, imgsz, classes, _yolo_device())
-    stride = max(int(stride), 1)
-    max_frames = int(max_frames)
+    args = _args(task, conf, IMGSZ, classes, _yolo_device())
 
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
@@ -337,31 +325,22 @@ def run_video(video, task, fmt, domain, dev, imgsz, conf, stride, max_frames, cl
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-    planned = (total // stride) if total else 0
-    if max_frames:
-        planned = min(planned, max_frames) if planned else max_frames
 
     out_path = OUTDIR / f"webviz_{task}_{fmt}.mp4"
-    out_fps = max(src_fps / stride, 1.0)
-    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"avc1"), out_fps, (w, h))
+    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"avc1"), src_fps, (w, h))
     if not writer.isOpened():
-        writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), out_fps, (w, h))
+        writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), src_fps, (w, h))
 
     idle_w = get_idle() if measure else None
     from collections import Counter
     tally = Counter()
-    hud = f"{task} | {fmt_label(fmt)} | imgsz{int(imgsz)}"
+    hud = f"{task} | {fmt_label(fmt)}"
     pm = PowerMeter()
-    n = 0
-    fi = -1
-    warmed = False
+    n, warmed = 0, False
     while True:
         ok, frame = cap.read()
         if not ok:
             break
-        fi += 1
-        if fi % stride != 0:
-            continue
         if not warmed:
             infer_once(model, frame, args)   # 워밍업
             warmed = True
@@ -375,12 +354,8 @@ def run_video(video, task, fmt, domain, dev, imgsz, conf, stride, max_frames, cl
         cv2.putText(ann, hud, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         writer.write(ann)
         n += 1
-        if planned:
-            progress(min(n / planned, 1.0), desc=f"{task} {n}/{planned} 프레임")
-        else:
-            progress((n % 100) / 100, desc=f"{task} {n} 프레임")
-        if max_frames and n >= max_frames:
-            break
+        progress(min(n / total, 1.0) if total else (n % 100) / 100,
+                 desc=f"{task} {n}{'/' + str(total) if total else ''} 프레임")
     if measure:
         pm.stop()
     cap.release()
@@ -390,9 +365,9 @@ def run_video(video, task, fmt, domain, dev, imgsz, conf, stride, max_frames, cl
     summary = f"**누적 탐지({n}프레임):** " + summary.split("** ", 1)[-1]
     if measure and n:
         r = pm.report(n_frames=n, idle_watt=idle_w)
-        report_md = _report_md(r) + f"\n\n<sub>영상 {n}프레임 · stride {stride} · " \
-                                    f"{fmt_label(fmt)} · imgsz {int(imgsz)}</sub>"
-        fig = _power_fig(pm, idle_w, f"{task} video · {fmt_label(fmt)} · imgsz{int(imgsz)}")
+        report_md = _report_md(r) + f"\n\n<sub>영상 {n}프레임(전체) · " \
+                                    f"{fmt_label(fmt)} · imgsz {IMGSZ}</sub>"
+        fig = _power_fig(pm, idle_w, f"{task} video · {fmt_label(fmt)}")
     else:
         report_md = "_전력 계측 꺼짐_"
         fig = _power_fig(None, None, "energy measurement off")
@@ -542,23 +517,19 @@ def build():
                              ("시맨틱세그 (SegFormer)", "semantic")],
                             value="detect", label="작업")
                         domain = gr.Radio(
-                            [("차량/도로 (Cityscapes)", "road"), ("항공/위성 (ADE20K)", "aerial")],
-                            value="road", label="시맨틱 도메인 (semantic 전용)")
-                        dev = gr.Radio(
-                            [("자동", "auto"), ("GPU (젯슨 온보드)", "cuda"), ("CPU (노트북 시연)", "cpu")],
-                            value="auto", label="추론 장치")
-                        fmt = gr.Radio(
-                            [("PyTorch (.pt)", "pt"), ("TensorRT FP16 (.engine)", "engine")],
-                            value="engine", label="YOLO 모델 포맷 (엔진=저전력, CPU선 자동 .pt)")
-                        imgsz = gr.Slider(256, 960, value=640, step=32, label="YOLO 추론 해상도 imgsz")
-                        conf = gr.Slider(0.05, 0.9, value=0.25, step=0.05, label="YOLO 신뢰도 임계값 conf")
-                        classes_text = gr.Textbox(label="YOLO 클래스 필터(선택)", placeholder="예: person car")
+                            [("항공/위성 (ADE20K)", "aerial"), ("차량/도로 (Cityscapes)", "road")],
+                            value="aerial", label="시맨틱 도메인", visible=False)
                         measure = gr.Checkbox(value=True, label="⚡ 전력 계측(tegrastats) 켜기")
-                        gr.Markdown("**이미지 옵션**")
-                        repeat = gr.Slider(1, 100, value=40, step=1, label="반복추론 횟수(이미지 계측 안정화)")
-                        gr.Markdown("**영상 옵션**")
-                        stride = gr.Slider(1, 10, value=2, step=1, label="프레임 스킵 stride (N중 1장)")
-                        max_frames = gr.Slider(0, 600, value=120, step=10, label="최대 프레임(0=전체)")
+                        gr.Markdown(
+                            "<sub>추론은 **TensorRT FP16 엔진**으로 **젯슨 GPU**에서 자동 실행 · "
+                            "imgsz **640** 고정 · 영상은 **전체 길이·모든 프레임**(끊김 없음)으로 처리.</sub>")
+                        with gr.Accordion("고급 설정", open=False):
+                            conf = gr.Slider(0.05, 0.9, value=0.25, step=0.05,
+                                             label="YOLO 신뢰도 임계값 conf")
+                            classes_text = gr.Textbox(label="YOLO 클래스 필터(선택)",
+                                                      placeholder="예: person car")
+                            repeat = gr.Slider(1, 100, value=40, step=1,
+                                               label="이미지 반복추론 횟수(전력계측 안정화용)")
 
                     with gr.Column(scale=2):
                         with gr.Tabs():
@@ -577,12 +548,15 @@ def build():
                         report_md = gr.Markdown()
                         power_plot = gr.Plot(label="전력 타임라인 (VDD_IN)", format="png")
 
+            # 시맨틱 도메인 선택기는 '시맨틱세그'일 때만 노출
+            task.change(lambda t: gr.update(visible=(t == "semantic")), task, domain)
+
             img_btn.click(run_image,
-                          [img_in, task, fmt, domain, dev, imgsz, conf, repeat, classes_text, measure],
+                          [img_in, task, domain, conf, repeat, classes_text, measure],
                           [img_before, img_after, summary_md, report_md, power_plot],
                           concurrency_limit=1)
             vid_btn.click(run_video,
-                          [vid_in, task, fmt, domain, dev, imgsz, conf, stride, max_frames, classes_text, measure],
+                          [vid_in, task, domain, conf, classes_text, measure],
                           [vid_out, summary_md, report_md, power_plot],
                           concurrency_limit=1)
 
