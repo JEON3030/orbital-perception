@@ -3,6 +3,10 @@ __pycache__/
 *.pyc
 .ultra/
 
+# 격리 설치한 transformers 스택(orbital-perception 전용). 용량 크고 재설치 가능.
+# 재생성: pip install --target _deps --no-deps transformers==4.46.3 huggingface_hub==0.26.5 tokenizers==0.20.3 regex
+_deps/
+
 # 모델 가중치/엔진 — 재생성·자동다운로드 가능하고 엔진은 이 기기 전용이라 커밋 제외
 #   .pt : YOLO()가 없으면 자동 다운로드,  .engine/.onnx : export_trt.sh 로 재생성
 *.pt

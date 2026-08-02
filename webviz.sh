@@ -6,5 +6,6 @@ export LD_LIBRARY_PATH="$HOME/wildfire-seg/libs:/usr/local/cuda/lib64:/usr/lib/a
 export PYTHONNOUSERSITE=1          # ~/.local의 깨진 torch/torchvision 무시
 export YOLO_CONFIG_DIR="$HOME/orbital-perception/.ultra"   # ultralytics 설정 격리
 export GRADIO_ANALYTICS_ENABLED=False
+export HF_HUB_DISABLE_TELEMETRY=1                          # SegFormer(HF) 텔레메트리 끔
 cd "$HOME/orbital-perception"
 exec "$HOME/wildfire-seg/.venv/bin/python" -u webviz.py "$@"

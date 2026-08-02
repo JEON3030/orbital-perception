@@ -39,15 +39,49 @@ sudo nvpmodel -m 0 && ./bench_power.sh 15W   # 15W (ID=0)
 | segment | 10.8 | 6.63 | 587 | 154 | 1.71 |
 (순수추론 = 유휴 4.96W 기준선을 뺀 동적 에너지)
 
+## 시맨틱 세그멘테이션 (정확도/의미 인식 흡수)
+YOLO 탐지/인스턴스세그(COCO)는 도로·건물·식생·수면·하늘 같은 **장면 의미**를 못 잡는다.
+위성/항공 관점엔 그게 핵심이라 **SegFormer 시맨틱 세그**를 에너지 프레임으로 흡수했다.
+```bash
+./semantic.sh input/sample.jpg                    # road(Cityscapes 19클래스)
+./semantic.sh input/sat.png --domain aerial       # aerial(ADE20K 150클래스)
+./semantic.sh input/x.jpg --device cpu            # 노트북 CPU 시연
+```
+- `device.py` — `--device auto|cpu|cuda`, fp16, **CUDA sync 시간보정**(비동기라 안 하면 mJ/frame 거짓), 젯슨 감지. 젯슨(GPU)·노트북(CPU) 한 코드로.
+- 실측(B0, sample): 젯슨 GPU fp16 ≈ **7.4 FPS·927 mJ/frame** vs 노트북 CPU ≈ 0.38 FPS·16,110 mJ/frame (**~17배** 효율).
+
+## 통합 지표 — mIoU-per-Joule
+정확도(park-hyun-su축)와 전력(이 프로젝트축)을 한 값으로: **mIoU ÷ (프레임당 에너지[J])**.
+```bash
+python metrics.py --selftest                                  # 지표 수식 검증
+python metrics.py --images <이미지> --labels <라벨PNG> --domain road   # 실측 mIoU+에너지+mIoU/J
+```
+
+## 시각화 웹앱
+```bash
+./webviz.sh          # http://<보드IP>:7860  — 대시보드 + 라이브(이미지/영상, YOLO+시맨틱, GPU/CPU)
+```
+
 ## 파일
-- `perception.py` — 메인. 탐지/세그 + 전력계측. 카메라 인덱스 입력 지원.
+- `perception.py` — YOLO 탐지/인스턴스세그 + 전력계측. 카메라 인덱스 입력 지원.
+- `semantic.py`   — SegFormer 시맨틱 세그(road/aerial) + 전력계측.
+- `device.py`     — 젯슨 GPU/노트북 CPU 장치 결정 한 곳(sync·fp16·폴백).
+- `metrics.py`    — mIoU(혼동행렬) + 통합지표 mIoU-per-Joule + 라벨폴더 평가.
 - `powerlog.py`   — tegrastats VDD_IN 샘플러(사다리꼴 적분 에너지). INA3221 폴백.
+- `export_trt.py` — YOLO .pt → TensorRT FP16/INT8 엔진.
+- `webviz.py`     — Gradio 시각화 웹앱(대시보드 + 라이브 추론).
 - `bench_power.sh`— 전력모드별 벤치 + `--compare` 표.
-- `run.sh`        — NV torch 환경변수(LD_LIBRARY_PATH, PYTHONNOUSERSITE) 래퍼.
+- `run.sh`/`semantic.sh`/`webviz.sh` — NV torch 환경변수 래퍼.
+- `_deps/`        — orbital-perception 전용 격리 transformers 스택(gitignore, 재설치 가능).
 
 ## 환경 메모
-- venv는 `~/wildfire-seg/.venv`(NV torch 2.5) 재사용. ultralytics 8.4.106.
-- torchvision 바이너리 없음 → `perception.py`가 NMS만 순수 torch로 스텁 주입.
+- venv는 `~/wildfire-seg/.venv`(NV torch 2.5, CUDA True) 재사용. ultralytics 8.4.106.
+- torchvision 바이너리 없음(메타데이터만 남음) → `perception.py`가 NMS만 스텁 주입.
+  스텁에 `__spec__` 부여 + `semantic.py`가 `_torchvision_available=False`로 못박아
+  transformers(SegFormer)와 한 프로세스 공존 가능.
+- transformers는 공유 venv의 hf-hub(1.x)와 torch 2.5 사이에 끼어 안 맞아서, 전용
+  `_deps/`(transformers 4.46 + hf-hub 0.26 + tokenizers 0.20)를 sys.path 앞에 둔다.
+  torch/GPU는 venv 것 사용 → 다른 프로젝트 안 건드림.
 - `~/.local`의 깨진 torch는 `PYTHONNOUSERSITE=1`로 무시.
 
 ## 다음 단계 (위성 방향)

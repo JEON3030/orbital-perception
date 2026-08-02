@@ -34,6 +34,13 @@ PowerMeter = perception.PowerMeter
 measure_idle = perception.measure_idle
 infer_once = perception.infer_once
 
+# 시맨틱 세그(SegFormer) + 장치 추상화(젯슨 GPU/노트북 CPU) + 통합지표(mIoU/J).
+# semantic 은 import 시 _deps(격리 transformers)만 sys.path 에 넣고, 무거운 로드는
+# 첫 추론에서 한다. transformers 는 torchvision 스텁과 충돌하지 않는다(메타데이터로 판별).
+import device
+import semantic
+from metrics import miou_per_joule
+
 import gradio as gr
 
 ROOT = Path(__file__).parent
@@ -86,9 +93,25 @@ def _resolve_classes(model, text):
     return ids or None
 
 
-def _args(task, conf, imgsz, classes):
+def _args(task, conf, imgsz, classes, dev=0):
     return SimpleNamespace(task=task, conf=float(conf), imgsz=int(imgsz),
-                           device=0, classes=classes)
+                           device=dev, classes=classes)
+
+
+def _yolo_device():
+    """device 모듈 결정을 ultralytics 인자로. CUDA면 0, 아니면 'cpu'."""
+    return 0 if device.is_cuda() else "cpu"
+
+
+def _miou_note(r):
+    """정확도(mIoU) 라벨이 없을 때, 통합지표 mIoU/J 를 park-hyun-su B0 기준선
+    (mIoU 0.650)으로 예시 환산해 보여준다. 실제 mIoU 는 metrics.py 라벨평가."""
+    mj = r.get("dynamic_mJ_per_frame") or r.get("mJ_per_frame")
+    if not mj:
+        return ""
+    ex = miou_per_joule(0.650, mj)
+    return (f"\n- ▶ **통합지표 예시**: mIoU 0.650(B0 기준선) 가정 시 "
+            f"**{ex} mIoU·J⁻¹** (순수추론 에너지 기준) — 실제 mIoU 는 `metrics.py` 라벨평가로 산출")
 
 
 def _summary_md(model, class_ids):
@@ -140,14 +163,56 @@ def _power_fig(pm, idle_w, title):
     return fig
 
 
+# ── 시맨틱 세그(SegFormer) 헬퍼 ────────────────────────────────────────────
+def _semantic_class_md(seg, id2label, prefix="픽셀 점유 클래스"):
+    rows = semantic.class_summary(seg, id2label)
+    if not rows:
+        return f"**{prefix}:** (없음)"
+    return f"**{prefix}:** " + ", ".join(f"{n} {p}%" for n, p in rows)
+
+
+def _image_semantic(image, domain, repeat, measure):
+    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    proc, model, id2label = semantic.get_model(domain)
+    device.sync(); semantic.infer_seg(proc, model, bgr); device.sync()   # 워밍업
+    idle_w = get_idle() if measure else None
+    reps = max(int(repeat), 1) if measure else 1
+    pm = PowerMeter()
+    if measure:
+        pm.start()
+    seg = None
+    for _ in range(reps):
+        seg = semantic.infer_seg(proc, model, bgr)
+    device.sync()
+    if measure:
+        pm.stop()
+    after = cv2.cvtColor(semantic.overlay(bgr, seg, domain, id2label), cv2.COLOR_BGR2RGB)
+    summary = _semantic_class_md(seg, id2label)
+    if measure:
+        r = pm.report(n_frames=reps, idle_watt=idle_w)
+        report_md = _report_md(r) + _miou_note(r) + \
+            f"\n\n<sub>SegFormer-B0 · {domain} · {device.summary()} · {reps}회 반복</sub>"
+        fig = _power_fig(pm, idle_w, f"semantic · {domain} · {device.name()}")
+    else:
+        report_md = f"_빠른 미리보기 (전력 계측 꺼짐) · {device.summary()}_"
+        fig = _power_fig(None, None, "energy measurement off")
+    return image, after, summary, report_md, fig
+
+
 # ── 이미지 추론 ───────────────────────────────────────────────────────────
-def run_image(image, task, fmt, imgsz, conf, repeat, classes_text, measure):
+def run_image(image, task, fmt, domain, dev, imgsz, conf, repeat, classes_text, measure):
     if image is None:
         raise gr.Error("이미지를 업로드하세요.")
+    device.set_mode(dev)
+    if task == "semantic":
+        return _image_semantic(image, domain, repeat, measure)
+    # YOLO 경로 — CPU 에서는 TensorRT 엔진이 안 돌아가므로 .pt 로 자동 전환
+    if not device.is_cuda() and fmt == "engine":
+        fmt = "pt"
     path = model_path(task, fmt)
     model = get_model(path)
     classes = _resolve_classes(model, classes_text)
-    args = _args(task, conf, imgsz, classes)
+    args = _args(task, conf, imgsz, classes, _yolo_device())
 
     # gradio는 RGB → 파이프라인(cv2)은 BGR
     bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
@@ -174,7 +239,7 @@ def run_image(image, task, fmt, imgsz, conf, repeat, classes_text, measure):
     if measure:
         r = pm.report(n_frames=reps, idle_watt=idle_w)
         report_md = _report_md(r) + f"\n\n<sub>동일 프레임 {reps}회 반복추론 평균 · " \
-                                    f"{fmt_label(fmt)} · imgsz {int(imgsz)}</sub>"
+                                    f"{fmt_label(fmt)} · imgsz {int(imgsz)} · {device.summary()}</sub>"
         fig = _power_fig(pm, idle_w, f"{task} · {fmt_label(fmt)} · imgsz{int(imgsz)}")
     else:
         report_md = "_빠른 미리보기 (전력 계측 꺼짐)_"
@@ -184,14 +249,84 @@ def run_image(image, task, fmt, imgsz, conf, repeat, classes_text, measure):
 
 
 # ── 영상 추론 ─────────────────────────────────────────────────────────────
-def run_video(video, task, fmt, imgsz, conf, stride, max_frames, classes_text,
+def _video_semantic(video, domain, stride, max_frames, measure, progress):
+    stride = max(int(stride), 1)
+    max_frames = int(max_frames)
+    cap = cv2.VideoCapture(video)
+    if not cap.isOpened():
+        raise gr.Error(f"영상을 열 수 없습니다: {video}")
+    proc, model, id2label = semantic.get_model(domain)
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    planned = min(total // stride, max_frames) if (total and max_frames) else (total // stride or max_frames)
+    out_path = OUTDIR / f"webviz_semantic_{domain}.mp4"
+    out_fps = max(src_fps / stride, 1.0)
+    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"avc1"), out_fps, (w, h))
+    if not writer.isOpened():
+        writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), out_fps, (w, h))
+    idle_w = get_idle() if measure else None
+    from collections import Counter
+    tally = Counter()
+    hud = f"semantic | {domain} | {device.name()}"
+    pm = PowerMeter()
+    n, fi, warmed, last_seg = 0, -1, False, None
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        fi += 1
+        if fi % stride != 0:
+            continue
+        if not warmed:
+            semantic.infer_seg(proc, model, frame); device.sync()
+            warmed = True
+            if measure:
+                pm.start()
+        seg = semantic.infer_seg(proc, model, frame)
+        last_seg = seg
+        for name_, _pct in semantic.class_summary(seg, id2label):
+            tally[name_] += 1
+        ann = semantic.overlay(frame, seg, domain, id2label)
+        cv2.putText(ann, hud, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4)
+        cv2.putText(ann, hud, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        writer.write(ann)
+        n += 1
+        progress(min(n / planned, 1.0) if planned else (n % 100) / 100,
+                 desc=f"semantic {n}{'/' + str(planned) if planned else ''} 프레임")
+        if max_frames and n >= max_frames:
+            break
+    device.sync()
+    if measure:
+        pm.stop()
+    cap.release()
+    writer.release()
+    summary = f"**누적 클래스({n}프레임):** " + ", ".join(f"{k}×{v}" for k, v in tally.most_common(8))
+    if measure and n:
+        r = pm.report(n_frames=n, idle_watt=idle_w)
+        report_md = _report_md(r) + _miou_note(r) + \
+            f"\n\n<sub>영상 {n}프레임 · stride {stride} · SegFormer-B0 · {domain} · {device.summary()}</sub>"
+        fig = _power_fig(pm, idle_w, f"semantic video · {domain} · {device.name()}")
+    else:
+        report_md = "_전력 계측 꺼짐_"
+        fig = _power_fig(None, None, "energy measurement off")
+    return str(out_path), summary, report_md, fig
+
+
+def run_video(video, task, fmt, domain, dev, imgsz, conf, stride, max_frames, classes_text,
               measure, progress=gr.Progress()):
     if not video:
         raise gr.Error("영상을 업로드하세요.")
+    device.set_mode(dev)
+    if task == "semantic":
+        return _video_semantic(video, domain, stride, max_frames, measure, progress)
+    if not device.is_cuda() and fmt == "engine":
+        fmt = "pt"
     path = model_path(task, fmt)
     model = get_model(path)
     classes = _resolve_classes(model, classes_text)
-    args = _args(task, conf, imgsz, classes)
+    args = _args(task, conf, imgsz, classes, _yolo_device())
     stride = max(int(stride), 1)
     max_frames = int(max_frames)
 
@@ -366,6 +501,18 @@ def dashboard_summary():
         md.append("\n> FP16이라 정확도 손실 없이 프레임당 에너지 절감. 순수 추론 에너지는 거의 절반.")
     else:
         md.append("_아직 벤치 결과가 없습니다. `./export_trt.sh` 후 `./bench_power.sh` 로 생성하세요._")
+
+    md.append(
+        "\n### 🧩 보완 (정확도/의미 인식 흡수)\n"
+        "탐지·인스턴스세그(YOLO/COCO)만으로는 위성·항공에서 필요한 **도로·건물·식생·수면·"
+        "하늘 같은 장면 의미**를 못 잡는다. 그래서 **SegFormer 시맨틱 세그**(차량/도로 "
+        "Cityscapes 19클래스, 항공/위성 ADE20K 150클래스)를 이 프로젝트의 에너지 프레임으로 "
+        "흡수했다. **라이브 추론 탭에서 `시맨틱세그`를 선택**하면 젯슨 GPU/노트북 CPU 양쪽에서 "
+        "픽셀 의미 + mJ/frame 이 함께 나온다.\n"
+        "- **통합지표 mIoU-per-Joule** = mIoU ÷ (프레임당 에너지[J]) — 정확도와 전력을 한 값으로. "
+        "라벨셋 평가는 `python metrics.py --images ... --labels ...`.\n"
+        "- **장치 대조(실측)**: 시맨틱세그 B0 — 젯슨 GPU fp16 ≈ 7.4 FPS·927 mJ/frame vs "
+        "노트북 CPU ≈ 0.38 FPS·16,110 mJ/frame → 온보드 GPU가 **약 17배** 에너지 효율.")
     return "\n".join(md)
 
 
@@ -373,7 +520,8 @@ def dashboard_summary():
 def build():
     with gr.Blocks(title="Orbital Perception 시각화") as demo:
         gr.Markdown("# 🛰️ Orbital Perception — 위성 온보드 저전력 인식 시각화\n"
-                    "탐지/세그멘테이션을 **프레임당 에너지(mJ/frame)** 관점에서 보여주는 대시보드입니다.")
+                    "YOLO 탐지/세그 + **SegFormer 시맨틱 세그**를 **프레임당 에너지(mJ/frame)** 관점에서 "
+                    "보여주는 대시보드. 젯슨 GPU(온보드)·노트북 CPU 양쪽 구동, 통합지표 **mIoU-per-Joule**.")
 
         with gr.Tabs():
             # ── 탭 1: 대시보드 ──
@@ -389,13 +537,22 @@ def build():
             with gr.Tab("🖼️ 라이브 추론 (이미지·영상)"):
                 with gr.Row():
                     with gr.Column(scale=1):
-                        task = gr.Radio(["detect", "segment"], value="detect", label="작업")
+                        task = gr.Radio(
+                            [("탐지 (YOLO)", "detect"), ("인스턴스세그 (YOLO)", "segment"),
+                             ("시맨틱세그 (SegFormer)", "semantic")],
+                            value="detect", label="작업")
+                        domain = gr.Radio(
+                            [("차량/도로 (Cityscapes)", "road"), ("항공/위성 (ADE20K)", "aerial")],
+                            value="road", label="시맨틱 도메인 (semantic 전용)")
+                        dev = gr.Radio(
+                            [("자동", "auto"), ("GPU (젯슨 온보드)", "cuda"), ("CPU (노트북 시연)", "cpu")],
+                            value="auto", label="추론 장치")
                         fmt = gr.Radio(
                             [("PyTorch (.pt)", "pt"), ("TensorRT FP16 (.engine)", "engine")],
-                            value="engine", label="모델 포맷 (엔진=저전력)")
-                        imgsz = gr.Slider(256, 960, value=640, step=32, label="추론 해상도 imgsz (작을수록 저전력)")
-                        conf = gr.Slider(0.05, 0.9, value=0.25, step=0.05, label="신뢰도 임계값 conf")
-                        classes_text = gr.Textbox(label="클래스 필터(선택)", placeholder="예: person car")
+                            value="engine", label="YOLO 모델 포맷 (엔진=저전력, CPU선 자동 .pt)")
+                        imgsz = gr.Slider(256, 960, value=640, step=32, label="YOLO 추론 해상도 imgsz")
+                        conf = gr.Slider(0.05, 0.9, value=0.25, step=0.05, label="YOLO 신뢰도 임계값 conf")
+                        classes_text = gr.Textbox(label="YOLO 클래스 필터(선택)", placeholder="예: person car")
                         measure = gr.Checkbox(value=True, label="⚡ 전력 계측(tegrastats) 켜기")
                         gr.Markdown("**이미지 옵션**")
                         repeat = gr.Slider(1, 100, value=40, step=1, label="반복추론 횟수(이미지 계측 안정화)")
@@ -421,11 +578,11 @@ def build():
                         power_plot = gr.Plot(label="전력 타임라인 (VDD_IN)", format="png")
 
             img_btn.click(run_image,
-                          [img_in, task, fmt, imgsz, conf, repeat, classes_text, measure],
+                          [img_in, task, fmt, domain, dev, imgsz, conf, repeat, classes_text, measure],
                           [img_before, img_after, summary_md, report_md, power_plot],
                           concurrency_limit=1)
             vid_btn.click(run_video,
-                          [vid_in, task, fmt, imgsz, conf, stride, max_frames, classes_text, measure],
+                          [vid_in, task, fmt, domain, dev, imgsz, conf, stride, max_frames, classes_text, measure],
                           [vid_out, summary_md, report_md, power_plot],
                           concurrency_limit=1)
 

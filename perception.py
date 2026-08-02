@@ -80,6 +80,13 @@ def _install_torchvision_stub():
     tv = types.ModuleType("torchvision")
     tv.ops = ops
     tv.__version__ = "stub-nms-only"
+    # __spec__ 를 붙여 둔다. 안 붙이면 같은 프로세스의 transformers 가
+    # importlib.util.find_spec("torchvision") 을 부를 때 "__spec__ is None" 으로
+    # 죽는다(SegFormer 시맨틱 세그와 공존). spec 이 있으면 transformers 는
+    # 메타데이터 버전 조회에 실패해 "torchvision 없음" 으로 올바로 판정한다.
+    import importlib.util as _ilu
+    tv.__spec__ = _ilu.spec_from_loader("torchvision", loader=None)
+    ops.__spec__ = _ilu.spec_from_loader("torchvision.ops", loader=None)
     sys.modules["torchvision"] = tv
     sys.modules["torchvision.ops"] = ops
 
