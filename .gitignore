@@ -21,3 +21,8 @@ outputs/trt_compare/*
 
 # gradio flagged/cache
 .gradio/
+
+# webviz 상시구동 런타임 로그(공유링크·부팅로그 등, 기기별로 달라 커밋 제외)
+webviz_service.log
+webviz_keeper.log
+webviz_url.txt

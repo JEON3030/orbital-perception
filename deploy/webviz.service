@@ -1,0 +1,19 @@
+[Unit]
+Description=Orbital Perception webviz (Gradio, LAN/Tailscale :7860)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/orbital-perception
+# webviz.sh 가 NV torch 환경(LD_LIBRARY_PATH/PYTHONNOUSERSITE/YOLO_CONFIG_DIR 등)을 세팅함.
+# --share(gradio.live 터널) 제거: 이 보드에서 불안정해 '연결 안 됨'의 원인이었음.
+# 접속은 Tailscale(http://100.98.39.102:7860) 또는 LAN(http://10.140.91.12:7860)으로 — 만료 없음.
+ExecStart=%h/orbital-perception/webviz.sh
+Restart=always
+RestartSec=5
+# 저널이 비영속이라 로그를 파일로 남긴다 (공유링크 확인용)
+StandardOutput=append:%h/orbital-perception/webviz_service.log
+StandardError=append:%h/orbital-perception/webviz_service.log
+
+[Install]
+WantedBy=default.target
