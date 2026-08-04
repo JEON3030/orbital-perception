@@ -94,9 +94,11 @@ def _resolve_classes(model, text):
     return ids or None
 
 
-def _args(task, conf, imgsz, classes, dev=0):
+def _args(task, conf, imgsz, classes, dev=0, track=False,
+          tracker="bytetrack.yaml"):
     return SimpleNamespace(task=task, conf=float(conf), imgsz=int(imgsz),
-                           device=dev, classes=classes)
+                           device=dev, classes=classes,
+                           track=bool(track), tracker=tracker)
 
 
 def _yolo_device():
@@ -306,7 +308,8 @@ def _video_semantic(video, domain, measure, progress):
     return str(out_path), summary, report_md, fig
 
 
-def run_video(video, task, domain, conf, classes_text, measure, progress=gr.Progress()):
+def run_video(video, task, domain, conf, classes_text, measure, track=False,
+              progress=gr.Progress()):
     if not video:
         raise gr.Error("영상을 업로드하세요.")
     device.set_mode("auto")
@@ -316,7 +319,7 @@ def run_video(video, task, domain, conf, classes_text, measure, progress=gr.Prog
     path = model_path(task, fmt)
     model = get_model(path)
     classes = _resolve_classes(model, classes_text)
-    args = _args(task, conf, IMGSZ, classes, _yolo_device())
+    args = _args(task, conf, IMGSZ, classes, _yolo_device(), track=track)
 
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
@@ -334,21 +337,29 @@ def run_video(video, task, domain, conf, classes_text, measure, progress=gr.Prog
     idle_w = get_idle() if measure else None
     from collections import Counter
     tally = Counter()
-    hud = f"{task} | {fmt_label(fmt)}"
+    seen_ids = set()                       # 추적 시 고유 객체(트랙ID)
+    hud = f"{task} | {fmt_label(fmt)}" + (" | track" if track else "")
     pm = PowerMeter()
-    n, warmed = 0, False
+    n, warmed, first_track = 0, False, True
     while True:
         ok, frame = cap.read()
         if not ok:
             break
         if not warmed:
-            infer_once(model, frame, args)   # 워밍업
+            infer_once(model, frame, args)   # 워밍업(predict, 트랙 미오염)
             warmed = True
             if measure:
                 pm.start()
-        res = infer_once(model, frame, args)
+        if track:
+            res = perception.infer_track(model, frame, args, persist=not first_track)
+            first_track = False
+        else:
+            res = infer_once(model, frame, args)
         if res.boxes is not None:
-            tally.update(int(i) for i in res.boxes.cls.tolist())
+            cls_list = [int(i) for i in res.boxes.cls.tolist()]
+            tally.update(cls_list)
+            if track and res.boxes.id is not None:
+                seen_ids.update(zip(cls_list, [int(i) for i in res.boxes.id.tolist()]))
         ann = res.plot()
         cv2.putText(ann, hud, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4)
         cv2.putText(ann, hud, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
@@ -363,6 +374,10 @@ def run_video(video, task, domain, conf, classes_text, measure, progress=gr.Prog
 
     summary = _summary_md(model, list(tally.elements()))
     summary = f"**누적 탐지({n}프레임):** " + summary.split("** ", 1)[-1]
+    if track:
+        uniq = Counter(c for c, _ in seen_ids)
+        uniq_md = _summary_md(model, list(uniq.elements())).split("** ", 1)[-1]
+        summary += f"\n\n**고유 객체(추적ID):** " + (uniq_md if uniq else "없음")
     if measure and n:
         r = pm.report(n_frames=n, idle_watt=idle_w)
         report_md = _report_md(r) + f"\n\n<sub>영상 {n}프레임(전체) · " \
@@ -541,6 +556,9 @@ def build():
                                     img_after = gr.Image(label="After (탐지/세그)")
                             with gr.Tab("영상"):
                                 vid_in = gr.Video(label="입력 영상", sources=["upload"])
+                                track_cb = gr.Checkbox(
+                                    value=True,
+                                    label="🎯 시간축 추적(ByteTrack) — 놓친 프레임 보완·깜빡임 제거·고유 객체 수 집계")
                                 vid_btn = gr.Button("▶ 영상 추론 실행", variant="primary")
                                 vid_out = gr.Video(label="처리 결과 (HUD 오버레이)")
 
@@ -556,7 +574,7 @@ def build():
                           [img_before, img_after, summary_md, report_md, power_plot],
                           concurrency_limit=1)
             vid_btn.click(run_video,
-                          [vid_in, task, domain, conf, classes_text, measure],
+                          [vid_in, task, domain, conf, classes_text, measure, track_cb],
                           [vid_out, summary_md, report_md, power_plot],
                           concurrency_limit=1)
 

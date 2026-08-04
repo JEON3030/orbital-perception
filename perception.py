@@ -113,6 +113,15 @@ def infer_once(model, frame, args):
                  verbose=False)[0]
 
 
+def infer_track(model, frame, args, persist):
+    # ByteTrack: 프레임 간 객체를 연관(추적) → 어려운 프레임에서 놓친 탐지를
+    # 트랙이 이어줘 영상 인식률·안정성 상승. persist=False면 트랙 상태 초기화(새 영상 시작).
+    return model.track(frame, persist=persist, tracker=args.tracker,
+                       conf=args.conf, imgsz=args.imgsz, device=args.device,
+                       classes=args.classes, retina_masks=(args.task == "segment"),
+                       verbose=False)[0]
+
+
 def save_energy(args, name, report, extra):
     out = Path(args.outdir) / f"{name}_{args.task}_energy.json"
     payload = {"task": args.task, "model": args.model, "imgsz": args.imgsz,
@@ -200,9 +209,11 @@ def run_video(model, source, args, idle_w, name):
         pbar = None
 
     tally = Counter()
+    seen_ids = set()                      # 추적 시 고유 객체(트랙ID) 집계
     n = 0
     fi = -1
     warmed = False
+    first_track = True                    # 새 영상: 첫 track 호출은 상태 초기화
     pm = PowerMeter()
     while True:
         ok, frame = cap.read()
@@ -211,13 +222,21 @@ def run_video(model, source, args, idle_w, name):
         fi += 1
         if fi % max(args.stride, 1) != 0:
             continue
-        if not warmed:                    # 첫 프레임 워밍업 후 계측 시작
+        if not warmed:                    # 첫 프레임 워밍업 후 계측 시작(predict, 트랙 미오염)
             infer_once(model, frame, args)
             warmed = True
             pm.start()
-        res = infer_once(model, frame, args)
+        if args.track:
+            res = infer_track(model, frame, args, persist=not first_track)
+            first_track = False
+        else:
+            res = infer_once(model, frame, args)
         if res.boxes is not None:
-            tally.update(int(i) for i in res.boxes.cls.tolist())
+            cls_list = [int(i) for i in res.boxes.cls.tolist()]
+            tally.update(cls_list)
+            if args.track and res.boxes.id is not None:
+                ids = [int(i) for i in res.boxes.id.tolist()]
+                seen_ids.update(zip(cls_list, ids))
         writer.write(res.plot())
         n += 1
         if pbar:
@@ -233,6 +252,11 @@ def run_video(model, source, args, idle_w, name):
     print(f"\n[{args.task}] {name} → {out_path}")
     print("누적 탐지:")
     print(summarize(model.names, list(tally.elements())))
+    if args.track:
+        uniq = Counter(c for c, _ in seen_ids)
+        print("고유 객체(추적ID 기준):")
+        print(summarize(model.names, list(uniq.elements())) if uniq
+              else "  (추적된 객체 없음)")
     report = pm.report(n_frames=n, idle_watt=idle_w)
     print_report(report)
     ej = save_energy(args, name, report, {"input": str(source), "stride": args.stride})
@@ -249,6 +273,10 @@ def main():
     ap.add_argument("--device", default=0, help="0=GPU, cpu=CPU")
     ap.add_argument("--classes", nargs="*", default=None, help="필터 클래스(person car ...)")
     ap.add_argument("--stride", type=int, default=1, help="영상 프레임 건너뛰기(N중 1장)")
+    ap.add_argument("--track", action="store_true",
+                    help="영상 시간축 추적(ByteTrack) — 놓친 프레임 보완·깜빡임 제거")
+    ap.add_argument("--tracker", default="bytetrack.yaml",
+                    help="추적기 설정(bytetrack.yaml/botsort.yaml)")
     ap.add_argument("--max-frames", type=int, default=0, help="영상 최대 프레임(0=전체)")
     ap.add_argument("--repeat", type=int, default=30, help="이미지: 계측용 반복 추론 횟수")
     ap.add_argument("--no-idle", action="store_true", help="유휴전력 사전측정 생략")
