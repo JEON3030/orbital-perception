@@ -51,7 +51,8 @@ TRT_DIR = OUTDIR / "trt_compare"
 ACCENT = "#00b4d8"
 IMG_EXT = perception.IMG_EXT
 VID_EXT = perception.VID_EXT
-IMGSZ = 640   # 벤치 운용점으로 고정(콤팩트화를 위해 UI 노출 안 함)
+IMGSZ = 640   # 영상 벤치 운용점(저전력)으로 고정(콤팩트화를 위해 UI 노출 안 함)
+IMG_ACC_SZ = 1280  # 사진 통합분석 정확도 우선 입력해상도(.pt·TTA) — 작은 객체 인식률↑
 
 # ── 모델/유휴전력 캐시 ────────────────────────────────────────────────────
 _models = {}
@@ -202,52 +203,59 @@ def _image_semantic(image, domain, repeat, measure):
     return image, after, summary, report_md, fig
 
 
-# ── 이미지 추론 ───────────────────────────────────────────────────────────
+# ── 이미지 추론: 탐지 + 시맨틱을 한 장에 동시 표시(정확도 우선) ──────────────
 def run_image(image, task, domain, conf, repeat, classes_text, measure):
+    """사진 분석: YOLO 탐지 박스 + SegFormer 시맨틱 오버레이를 한 이미지에 함께 출력.
+    (task 선택은 무시 — 영상 전용.) 사진은 속도보다 정확도가 중요하므로 640 엔진 대신
+    .pt 모델을 고해상도(imgsz IMG_ACC_SZ) + TTA(augment)로 돌려 인식률을 높인다."""
     if image is None:
         raise gr.Error("이미지를 업로드하세요.")
     device.set_mode("auto")               # 젯슨=GPU 자동, 그 외 CPU
-    if task == "semantic":
-        return _image_semantic(image, domain, repeat, measure)
-    # YOLO 경로 — 항상 TensorRT FP16 엔진(저전력). CPU면 엔진 미지원이라 자동 .pt.
-    fmt = "engine" if device.is_cuda() else "pt"
-    path = model_path(task, fmt)
-    model = get_model(path)
-    classes = _resolve_classes(model, classes_text)
-    args = _args(task, conf, IMGSZ, classes, _yolo_device())
+    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)   # gradio RGB → cv2 BGR
 
-    # gradio는 RGB → 파이프라인(cv2)은 BGR
-    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    infer_once(model, bgr, args)  # 워밍업(계측 제외)
+    # 시맨틱(SegFormer) + 탐지(YOLO .pt) 모델 준비
+    sproc, smodel, id2label = semantic.get_model(domain)
+    ymodel = get_model(model_path("detect", "pt"))   # 정확도 우선: 가변 고해상도 위해 .pt
+    classes = _resolve_classes(ymodel, classes_text)
+    args = _args("detect", conf, IMG_ACC_SZ, classes, _yolo_device())
+    args.augment = True                               # TTA — 다중스케일/플립으로 인식률↑
 
-    idle_w = None
-    pm = None
+    # 워밍업(계측 제외)
+    device.sync()
+    semantic.infer_seg(sproc, smodel, bgr); infer_once(ymodel, bgr, args)
+    device.sync()
+
+    idle_w = get_idle() if measure else None
+    reps = max(int(repeat), 1) if measure else 1
+    pm = PowerMeter()
     if measure:
-        idle_w = get_idle()
-        reps = max(int(repeat), 1)
-        pm = PowerMeter()
-        with pm:
-            res = None
-            for _ in range(reps):
-                res = infer_once(model, bgr, args)
-    else:
-        reps = 1
-        res = infer_once(model, bgr, args)
+        pm.start()
+    seg = res = None
+    for _ in range(reps):                             # 반복 시 두 모델 모두 계측(통합 mJ/frame)
+        seg = semantic.infer_seg(sproc, smodel, bgr)
+        res = infer_once(ymodel, bgr, args)
+    device.sync()
+    if measure:
+        pm.stop()
 
-    annotated = cv2.cvtColor(res.plot(), cv2.COLOR_BGR2RGB)
+    base = semantic.overlay(bgr, seg, domain, id2label)   # 시맨틱 색 오버레이(BGR)
+    combined = res.plot(img=base.copy())                  # 그 위에 YOLO 탐지 박스
+    after = cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)
+
     cls = res.boxes.cls.tolist() if res.boxes is not None else []
-    summary = _summary_md(model, cls)
+    summary = _summary_md(ymodel, cls) + "\n\n" + _semantic_class_md(seg, id2label)
 
     if measure:
         r = pm.report(n_frames=reps, idle_watt=idle_w)
-        report_md = _report_md(r) + f"\n\n<sub>동일 프레임 {reps}회 반복추론 평균 · " \
-                                    f"{fmt_label(fmt)} · imgsz {IMGSZ} · {device.summary()}</sub>"
-        fig = _power_fig(pm, idle_w, f"{task} · {fmt_label(fmt)} · imgsz{IMGSZ}")
+        report_md = _report_md(r) + \
+            f"\n\n<sub>탐지(.pt·imgsz{IMG_ACC_SZ}·TTA) + 시맨틱(SegFormer·{domain}) 통합 · " \
+            f"{reps}회 반복 · {device.summary()}</sub>"
+        fig = _power_fig(pm, idle_w, f"detect+semantic · imgsz{IMG_ACC_SZ}·TTA")
     else:
-        report_md = "_빠른 미리보기 (전력 계측 꺼짐)_"
+        report_md = f"_빠른 미리보기 (전력 계측 꺼짐) · {device.summary()}_"
         fig = _power_fig(None, None, "energy measurement off")
 
-    return image, annotated, summary, report_md, fig
+    return image, after, summary, report_md, fig
 
 
 # ── 영상 추론 ─────────────────────────────────────────────────────────────
@@ -530,10 +538,10 @@ def build():
                         task = gr.Radio(
                             [("탐지 (YOLO)", "detect"), ("인스턴스세그 (YOLO)", "segment"),
                              ("시맨틱세그 (SegFormer)", "semantic")],
-                            value="detect", label="작업")
+                            value="detect", label="작업 (영상 전용 · 사진은 탐지+시맨틱 자동 통합)")
                         domain = gr.Radio(
                             [("항공/위성 (ADE20K)", "aerial"), ("차량/도로 (Cityscapes)", "road")],
-                            value="aerial", label="시맨틱 도메인", visible=False)
+                            value="aerial", label="시맨틱 도메인 (사진 통합분석 · 영상 시맨틱)")
                         measure = gr.Checkbox(value=True, label="⚡ 전력 계측(tegrastats) 켜기")
                         gr.Markdown(
                             "<sub>추론은 **TensorRT FP16 엔진**으로 **젯슨 GPU**에서 자동 실행 · "
@@ -549,11 +557,14 @@ def build():
                     with gr.Column(scale=2):
                         with gr.Tabs():
                             with gr.Tab("이미지"):
+                                gr.Markdown("<sub>📷 사진은 **탐지 + 시맨틱을 한 장에** 동시 표시하며, "
+                                            f"**정확도 우선**(.pt · imgsz {IMG_ACC_SZ} · TTA)으로 실행됩니다. "
+                                            "왼쪽 '작업' 선택은 영상에만 적용돼요.</sub>")
                                 img_in = gr.Image(type="numpy", label="입력 이미지", sources=["upload", "clipboard"])
-                                img_btn = gr.Button("▶ 이미지 추론 실행", variant="primary")
+                                img_btn = gr.Button("▶ 이미지 추론 실행 (탐지+시맨틱)", variant="primary")
                                 with gr.Row():
                                     img_before = gr.Image(label="Before (원본)")
-                                    img_after = gr.Image(label="After (탐지/세그)")
+                                    img_after = gr.Image(label="After (탐지+시맨틱 통합)")
                             with gr.Tab("영상"):
                                 vid_in = gr.Video(label="입력 영상", sources=["upload"])
                                 track_cb = gr.Checkbox(
@@ -565,9 +576,6 @@ def build():
                         summary_md = gr.Markdown()
                         report_md = gr.Markdown()
                         power_plot = gr.Plot(label="전력 타임라인 (VDD_IN)", format="png")
-
-            # 시맨틱 도메인 선택기는 '시맨틱세그'일 때만 노출
-            task.change(lambda t: gr.update(visible=(t == "semantic")), task, domain)
 
             img_btn.click(run_image,
                           [img_in, task, domain, conf, repeat, classes_text, measure],

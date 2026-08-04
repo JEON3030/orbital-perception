@@ -110,7 +110,7 @@ def summarize(names, class_ids):
 def infer_once(model, frame, args):
     return model(frame, conf=args.conf, imgsz=args.imgsz, device=args.device,
                  classes=args.classes, retina_masks=(args.task == "segment"),
-                 verbose=False)[0]
+                 augment=getattr(args, "augment", False), verbose=False)[0]
 
 
 def infer_track(model, frame, args, persist):
