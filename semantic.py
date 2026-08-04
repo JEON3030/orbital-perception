@@ -102,10 +102,14 @@ def infer_seg(proc, model, bgr):
     inputs = proc(images=rgb, return_tensors="pt")
     px = device.to_inputs(inputs["pixel_values"])
     with torch.no_grad():
-        logits = model(pixel_values=px).logits
-    up = torch.nn.functional.interpolate(
-        logits.float(), size=bgr.shape[:2], mode="bilinear", align_corners=False)
-    return up.argmax(1)[0].to("cpu").numpy()
+        logits = model(pixel_values=px).logits            # [1, C, h/4, w/4]
+    # 저해상도 로짓에서 먼저 argmax → 클래스맵만 nearest 업샘플.
+    # (기존: 로짓을 원본해상도로 bilinear 업샘플 후 argmax → [1,C,H,W] float 텐서가
+    #  150클래스·고해상도에서 수 GB로 폭증해 젯슨 공유메모리 OOM 크래시.)
+    # 이제 [1,1,H,W]만 만들어 메모리 C배 절감(경계는 약간 블로키하나 OOM 방지).
+    small = logits.argmax(1, keepdim=True).float()        # [1, 1, h/4, w/4]
+    up = torch.nn.functional.interpolate(small, size=bgr.shape[:2], mode="nearest")
+    return up[0, 0].to("cpu").numpy().astype("int64")
 
 
 def colorize(seg, domain, id2label):
