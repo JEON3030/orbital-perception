@@ -12,6 +12,7 @@ _deps/
 *.pt
 *.onnx
 *.engine
+segformer_*_labels.json   # SegFormer 엔진과 함께 export_seg_trt.py 가 재생성(엔진 전용 메타)
 
 # 실행 산출물 — 벤치 결과 JSON(대시보드가 읽음)만 남기고 이미지/영상은 제외
 outputs/*

@@ -112,6 +112,47 @@ def infer_seg(proc, model, bgr):
     return up[0, 0].to("cpu").numpy().astype("int64")
 
 
+# ── 백엔드 추상화: TensorRT 엔진(있으면) ↔ PyTorch(폴백) ────────────────────
+# SegFormer 를 TRT FP16 엔진으로 굳히면 시맨틱이 병목(~7FPS)에서 벗어난다
+# (export_seg_trt.py). 엔진이 있고 CUDA 면 자동으로 TRT, 아니면 PyTorch 로 폴백.
+# 두 백엔드 모두 .infer(bgr)->HxW int64, .id2label, .kind 를 노출해 호출부는 동일.
+_FORCE_TORCH = os.environ.get("ORBITAL_SEG_NO_TRT", "").strip() == "1"
+
+
+def use_trt(domain):
+    if _FORCE_TORCH or not device.is_cuda():
+        return False
+    try:
+        import seg_trt
+    except Exception:
+        return False
+    return seg_trt.available(domain)
+
+
+class _TorchBackend:
+    """기존 PyTorch/transformers 경로를 백엔드 인터페이스로 감싼 어댑터."""
+    kind = "torch"
+
+    def __init__(self, domain):
+        self.proc, self.model, self.id2label = get_model(domain)
+
+    def infer(self, bgr):
+        return infer_seg(self.proc, self.model, bgr)
+
+
+def get_backend(domain):
+    """도메인별 세그 백엔드. 엔진 있으면 TRTSeg, 없으면 _TorchBackend."""
+    if use_trt(domain):
+        import seg_trt
+        seg, _ = seg_trt.get(domain)
+        return seg          # TRTSeg: .infer/.id2label/.kind="trt"(자체)
+    return _TorchBackend(domain)
+
+
+def backend_label(backend):
+    return "TRT-FP16" if getattr(backend, "kind", "") == "trt" else "PyTorch"
+
+
 def colorize(seg, domain, id2label):
     """클래스맵 → 색 마스크(BGR)."""
     n = (max(id2label) + 1) if id2label else int(seg.max()) + 1
@@ -165,14 +206,15 @@ def print_report(r, extra=""):
 
 def measure_image(domain, bgr, reps, idle_w):
     """이미지 1장을 reps회 반복추론하며 에너지 측정. (seg, id2label, report) 반환."""
-    proc, model, id2label = get_model(domain)
+    backend = get_backend(domain)              # 엔진 있으면 TRT, 없으면 PyTorch
+    id2label = backend.id2label
     device.sync()
-    seg = infer_seg(proc, model, bgr)          # 워밍업(측정 제외)
+    seg = backend.infer(bgr)                    # 워밍업(측정 제외)
     device.sync()
     pm = PowerMeter()
     pm.start()
     for _ in range(max(reps, 1)):
-        seg = infer_seg(proc, model, bgr)
+        seg = backend.infer(bgr)
     device.sync()                              # CUDA 비동기 보정 — 큐가 다 빈 뒤 정지
     pm.stop()
     return seg, id2label, report_dict(pm, max(reps, 1), idle_w)
@@ -206,7 +248,8 @@ def run_video(source, args, idle_w, name):
     if not cap.isOpened():
         print(f"[에러] 영상/카메라 못 엶: {source}")
         return
-    proc, model, id2label = get_model(args.domain)
+    backend = get_backend(args.domain)          # 엔진 있으면 TRT
+    id2label = backend.id2label
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
@@ -228,11 +271,11 @@ def run_video(source, args, idle_w, name):
         if fi % max(args.stride, 1) != 0:
             continue
         if not warmed:
-            infer_seg(proc, model, frame)
+            backend.infer(frame)
             device.sync()
             warmed = True
             pm.start()
-        seg = infer_seg(proc, model, frame)
+        seg = backend.infer(frame)
         for name_, pct in class_summary(seg, id2label):
             tally[name_] += 1
         writer.write(overlay(frame, seg, args.domain, id2label))
@@ -269,8 +312,9 @@ def main():
         idle_w = measure_idle(2.0)
         print(f"  유휴 평균 {idle_w:.2f} W")
 
-    print(f"모델 로딩: {MODEL_IDS[args.domain]} ({args.domain}) ...")
-    get_model(args.domain)
+    _b = "TRT-FP16 엔진" if use_trt(args.domain) else "PyTorch"
+    print(f"모델 로딩: {MODEL_IDS[args.domain]} ({args.domain}) · 백엔드 {_b} ...")
+    get_backend(args.domain)
 
     if str(args.source).isdigit():
         run_video(args.source, args, idle_w, name=f"cam{args.source}")

@@ -177,8 +177,9 @@ def _semantic_class_md(seg, id2label, prefix="픽셀 점유 클래스"):
 
 def _image_semantic(image, domain, repeat, measure):
     bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    proc, model, id2label = semantic.get_model(domain)
-    device.sync(); semantic.infer_seg(proc, model, bgr); device.sync()   # 워밍업
+    backend = semantic.get_backend(domain)         # 엔진 있으면 TRT, 없으면 PyTorch
+    id2label = backend.id2label
+    device.sync(); backend.infer(bgr); device.sync()   # 워밍업
     idle_w = get_idle() if measure else None
     reps = max(int(repeat), 1) if measure else 1
     pm = PowerMeter()
@@ -186,7 +187,7 @@ def _image_semantic(image, domain, repeat, measure):
         pm.start()
     seg = None
     for _ in range(reps):
-        seg = semantic.infer_seg(proc, model, bgr)
+        seg = backend.infer(bgr)
     device.sync()
     if measure:
         pm.stop()
@@ -195,7 +196,7 @@ def _image_semantic(image, domain, repeat, measure):
     if measure:
         r = pm.report(n_frames=reps, idle_watt=idle_w)
         report_md = _report_md(r) + _miou_note(r) + \
-            f"\n\n<sub>SegFormer-B0 · {domain} · {device.summary()} · {reps}회 반복</sub>"
+            f"\n\n<sub>SegFormer-B0({semantic.backend_label(backend)}) · {domain} · {device.summary()} · {reps}회 반복</sub>"
         fig = _power_fig(pm, idle_w, f"semantic · {domain} · {device.name()}")
     else:
         report_md = f"_빠른 미리보기 (전력 계측 꺼짐) · {device.summary()}_"
@@ -213,8 +214,9 @@ def run_image(image, task, domain, conf, repeat, classes_text, measure):
     device.set_mode("auto")               # 젯슨=GPU 자동, 그 외 CPU
     bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)   # gradio RGB → cv2 BGR
 
-    # 시맨틱(SegFormer) + 탐지(YOLO .pt) 모델 준비
-    sproc, smodel, id2label = semantic.get_model(domain)
+    # 시맨틱(SegFormer, 엔진 있으면 TRT) + 탐지(YOLO .pt) 모델 준비
+    sbackend = semantic.get_backend(domain)
+    id2label = sbackend.id2label
     ymodel = get_model(model_path("detect", "pt"))   # 정확도 우선: 가변 고해상도 위해 .pt
     classes = _resolve_classes(ymodel, classes_text)
     args = _args("detect", conf, IMG_ACC_SZ, classes, _yolo_device())
@@ -222,7 +224,7 @@ def run_image(image, task, domain, conf, repeat, classes_text, measure):
 
     # 워밍업(계측 제외)
     device.sync()
-    semantic.infer_seg(sproc, smodel, bgr); infer_once(ymodel, bgr, args)
+    sbackend.infer(bgr); infer_once(ymodel, bgr, args)
     device.sync()
 
     idle_w = get_idle() if measure else None
@@ -232,7 +234,7 @@ def run_image(image, task, domain, conf, repeat, classes_text, measure):
         pm.start()
     seg = res = None
     for _ in range(reps):                             # 반복 시 두 모델 모두 계측(통합 mJ/frame)
-        seg = semantic.infer_seg(sproc, smodel, bgr)
+        seg = sbackend.infer(bgr)
         res = infer_once(ymodel, bgr, args)
     device.sync()
     if measure:
@@ -248,7 +250,7 @@ def run_image(image, task, domain, conf, repeat, classes_text, measure):
     if measure:
         r = pm.report(n_frames=reps, idle_watt=idle_w)
         report_md = _report_md(r) + \
-            f"\n\n<sub>탐지(.pt·imgsz{IMG_ACC_SZ}·TTA) + 시맨틱(SegFormer·{domain}) 통합 · " \
+            f"\n\n<sub>탐지(.pt·imgsz{IMG_ACC_SZ}·TTA) + 시맨틱(SegFormer[{semantic.backend_label(sbackend)}]·{domain}) 통합 · " \
             f"{reps}회 반복 · {device.summary()}</sub>"
         fig = _power_fig(pm, idle_w, f"detect+semantic · imgsz{IMG_ACC_SZ}·TTA")
     else:
@@ -265,7 +267,8 @@ def _video_semantic(video, domain, measure, progress):
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
         raise gr.Error(f"영상을 열 수 없습니다: {video}")
-    proc, model, id2label = semantic.get_model(domain)
+    backend = semantic.get_backend(domain)          # 엔진 있으면 TRT
+    id2label = backend.id2label
     src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
@@ -277,7 +280,7 @@ def _video_semantic(video, domain, measure, progress):
     idle_w = get_idle() if measure else None
     from collections import Counter
     tally = Counter()
-    hud = f"semantic | {domain} | {device.name()}"
+    hud = f"semantic | {domain} | {semantic.backend_label(backend)} | {device.name()}"
     pm = PowerMeter()
     n, warmed = 0, False
     while True:
@@ -285,11 +288,11 @@ def _video_semantic(video, domain, measure, progress):
         if not ok:
             break
         if not warmed:
-            semantic.infer_seg(proc, model, frame); device.sync()
+            backend.infer(frame); device.sync()
             warmed = True
             if measure:
                 pm.start()
-        seg = semantic.infer_seg(proc, model, frame)
+        seg = backend.infer(frame)
         for name_, _pct in semantic.class_summary(seg, id2label):
             tally[name_] += 1
         ann = semantic.overlay(frame, seg, domain, id2label)
@@ -308,7 +311,7 @@ def _video_semantic(video, domain, measure, progress):
     if measure and n:
         r = pm.report(n_frames=n, idle_watt=idle_w)
         report_md = _report_md(r) + _miou_note(r) + \
-            f"\n\n<sub>영상 {n}프레임(전체) · SegFormer-B0 · {domain} · {device.summary()}</sub>"
+            f"\n\n<sub>영상 {n}프레임(전체) · SegFormer-B0({semantic.backend_label(backend)}) · {domain} · {device.summary()}</sub>"
         fig = _power_fig(pm, idle_w, f"semantic video · {domain} · {device.name()}")
     else:
         report_md = "_전력 계측 꺼짐_"
