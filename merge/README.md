@@ -45,6 +45,10 @@ python3 -m merge label post.npy --target burn --pre pre.npy --out burn.npy  # �
 python3 -m merge detect water.npy --class-id 13 --min-area 25 --out flood.json  # 물→홍수 폴리곤
 python3 -m merge check flood.json --kind det          # seg-파생 탐지가 계약에 맞는지
 
+# 1.6) 학습 데이터셋 구축 — 기본 재해 이벤트 취득→유사라벨→타일(npz) + manifest
+python3 -m merge dataset --out-dir data/sat_disaster --tile 256
+#   기본: 울진2022 산불(dNBR) + 낙동 홍수(MNDWI). --events custom.json 로 교체 가능
+
 # 2) 유휴 전력 → 이 값이 있어야 dynamic(순수) mJ/frame 이 나온다
 python3 -m merge idle
 

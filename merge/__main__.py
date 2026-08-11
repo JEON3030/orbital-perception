@@ -11,7 +11,7 @@ import numpy as np
 
 from . import acquire
 from . import adopt as adopt_mod
-from . import contract, labels, meter, score, vectorize
+from . import contract, dataset, labels, meter, score, vectorize  # noqa: F401 (selftest 사용)
 
 
 def _print_contract() -> None:
@@ -55,6 +55,20 @@ def _cmd_acquire(a: argparse.Namespace) -> int:
           f"밴드 {meta['bands']}")
     if a.out:
         print(f"\n→ 저장: {a.out} (+ .provenance.json)  — `merge check {a.out} --kind in` 로 확인")
+    return 0
+
+
+def _cmd_dataset(a: argparse.Namespace) -> int:
+    events = json.loads(Path(a.events).read_text()) if a.events else dataset.DEFAULT_EVENTS
+    print(f"■ 데이터셋 구축 — 이벤트 {len(events)}개, tile {a.tile}  (유사라벨, 진짜 GT 아님)")
+    man = dataset.build_dataset(events, a.out_dir, tile=a.tile, stride=a.stride)
+    for e in man["events"]:
+        if e.get("error"):
+            print(f"  ✗ {e['event']}: {e['error'][:80]}")
+        else:
+            print(f"  ✓ {e['event']:22} {e['kind']:5} 타일 {e['tiles']:3d} · 양성 "
+                  f"{e['pos_frac']*100:5.2f}% · {e['scene_shape']} · {e['pseudo_label']}")
+    print(f"\n총 타일 {man['total_tiles']} → {a.out_dir}/  (manifest.json)")
     return 0
 
 
@@ -296,6 +310,12 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--collection", default=acquire.COLLECTION)
     q.add_argument("--out", help="6밴드 float32 npy 저장 경로(+.provenance.json)")
 
+    ds = sub.add_parser("dataset", help="기본 재해 이벤트 → 유사라벨 학습 타일셋 구축")
+    ds.add_argument("--out-dir", required=True, dest="out_dir")
+    ds.add_argument("--tile", type=int, default=256)
+    ds.add_argument("--stride", type=int, default=None)
+    ds.add_argument("--events", help="커스텀 이벤트 JSON(없으면 기본 이벤트)")
+
     lb = sub.add_parser("label", help="분광지수 유사라벨 생성(재해 학습 정답, 손라벨 없이)")
     lb.add_argument("scene", help="6밴드 계약 npy(post)")
     lb.add_argument("--target", choices=["water", "burn"], required=True)
@@ -365,6 +385,8 @@ def main(argv=None) -> int:
         _print_contract(); return 0
     if a.cmd == "acquire":
         return _cmd_acquire(a)
+    if a.cmd == "dataset":
+        return _cmd_dataset(a)
     if a.cmd == "label":
         return _cmd_label(a)
     if a.cmd == "detect":
@@ -510,6 +532,9 @@ def _selftest() -> int:
     vd = vectorize.vectorize_mask(m, 13)                        # 홍수=폴리곤
     expect(len(vd["detections"]) == 1 and vd["detections"][0]["geom_type"] == "polygon",
            "마스크→홍수 폴리곤 탐지(계약 자체통과)")
+    cube0 = np.zeros((512, 512, contract.N_BANDS), np.float32)
+    expect(len(dataset.tile_arrays(cube0, np.zeros((512, 512), np.uint8))) == 4,
+           "512² → 256 타일 4개(학습셋 타일링)")
 
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "o.npy"; np.save(p, good_out)

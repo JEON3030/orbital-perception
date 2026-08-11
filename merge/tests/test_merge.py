@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from merge import acquire, adopt, contract, labels, score, vectorize
+from merge import acquire, adopt, contract, dataset, labels, score, vectorize
 
 
 # ── 계약 ──────────────────────────────────────────────────────────────
@@ -396,3 +396,41 @@ def test_vectorize_two_objects():
 def test_vectorize_bad_class_id_rejected():
     with pytest.raises(ValueError):
         vectorize.vectorize_mask(_rect_mask(), 3)        # 분할 번호는 탐지 아님
+
+
+# ── 데이터셋 타일링 (재해 유사라벨 학습셋) ──────────────────────────────────
+def test_tile_arrays_full_grid_count():
+    cube = np.zeros((512, 512, contract.N_BANDS), np.float32)
+    lab = np.zeros((512, 512), np.uint8)
+    tiles = dataset.tile_arrays(cube, lab, tile=256, stride=256)
+    assert len(tiles) == 4                               # 2×2
+    assert tiles[0][0].shape == (256, 256, contract.N_BANDS)
+    assert tiles[0][1].shape == (256, 256)
+
+
+def test_tile_arrays_drops_edge_remainder():
+    cube = np.zeros((300, 300, contract.N_BANDS), np.float32)
+    lab = np.zeros((300, 300), np.uint8)
+    assert len(dataset.tile_arrays(cube, lab, tile=256)) == 1   # 잔여 44px 버림
+
+
+def test_tile_arrays_keep_empty_false_filters():
+    cube = np.zeros((512, 512, contract.N_BANDS), np.float32)
+    lab = np.zeros((512, 512), np.uint8)
+    lab[:256, :256] = 1                                  # 한 타일만 양성
+    tiles = dataset.tile_arrays(cube, lab, tile=256, keep_empty=False, min_pos=0.01)
+    assert len(tiles) == 1 and tiles[0][2] == 1.0
+
+
+def test_tile_arrays_shape_mismatch_fails():
+    with pytest.raises(ValueError):
+        dataset.tile_arrays(np.zeros((10, 10, contract.N_BANDS), np.float32),
+                            np.zeros((10, 8), np.uint8))
+
+
+def test_default_events_wellformed():
+    for ev in dataset.DEFAULT_EVENTS:
+        assert len(ev["bbox"]) == 4 and ev["kind"] in dataset.DET_CLASS
+        assert "post" in ev and len(ev["post"]) == 2
+        if ev["kind"] == "burn":
+            assert len(ev["pre"]) == 2                   # dNBR 은 pre 필요
