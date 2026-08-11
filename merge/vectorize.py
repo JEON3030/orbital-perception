@@ -24,8 +24,10 @@ POLY_EPS_FRAC = 0.01             # approxPolyDP 단순화 강도(둘레 대비)
 def vectorize_mask(mask: np.ndarray, class_id: int, *,
                    gsd_m: float = contract.DEFAULT_GSD_M,
                    min_area_px: float = DEFAULT_MIN_AREA_PX,
-                   geom: str | None = None, score: float = 1.0) -> dict:
-    """이진 마스크(nonzero=객체)를 class_id 의 탐지 문서로. geom 미지정 시 클래스 기본기하."""
+                   geom: str | None = None, score: float = 1.0,
+                   label_value: int | None = None) -> dict:
+    """마스크를 class_id 의 탐지 문서로. label_value 를 주면 그 값인 화소만(다중클래스 세그맵에서
+    특정 재해 선택), 없으면 nonzero 를 객체로 본다. geom 미지정 시 클래스 기본기하."""
     if class_id not in contract.DET_BY_ID:
         raise ValueError(
             f"class_id {class_id} 는 탐지 번호표 {contract.DET_MIN_ID}~{contract.DET_MAX_ID} 밖.")
@@ -35,7 +37,7 @@ def vectorize_mask(mask: np.ndarray, class_id: int, *,
     if geom not in contract.GEOM_TYPES:
         raise ValueError(f"geom 은 {contract.GEOM_TYPES} 중 하나여야 한다(받음 {geom!r}).")
     H, W = mask.shape
-    binary = (mask != 0).astype(np.uint8)
+    binary = ((mask == label_value) if label_value is not None else (mask != 0)).astype(np.uint8)
 
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     dets: list[dict] = []

@@ -66,8 +66,9 @@ def _cmd_dataset(a: argparse.Namespace) -> int:
         if e.get("error"):
             print(f"  ✗ {e['event']}: {e['error'][:80]}")
         else:
-            print(f"  ✓ {e['event']:22} {e['kind']:5} 타일 {e['tiles']:3d} · 양성 "
-                  f"{e['pos_frac']*100:5.2f}% · {e['scene_shape']} · {e['pseudo_label']}")
+            print(f"  ✓ {e['event']:22} {e['kind']:5} 타일 {e['tiles']:3d} · 양성(valid내) "
+                  f"{e['pos_frac_valid']*100:5.2f}% · valid {e['valid_fraction']*100:4.0f}% · "
+                  f"{e['pseudo_label']}")
     print(f"\n총 타일 {man['total_tiles']} → {a.out_dir}/  (manifest.json)")
     return 0
 
@@ -94,11 +95,29 @@ def _cmd_label(a: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_segment(a: argparse.Namespace) -> int:
+    from . import train_seg
+    cube = np.load(a.scene)
+    try:
+        seg, classes = train_seg.predict_mask(cube, a.model)
+    except (contract.ContractError, FileNotFoundError) as e:
+        print(f"✗ 세그 추론 실패\n  {e}")
+        return 1
+    frac = {classes[c]: round(float((seg == c).mean()) * 100, 2) for c in range(len(classes))}
+    print(f"■ 재해 세그  {seg.shape}  클래스비율%: {frac}")
+    if a.out:
+        np.save(a.out, seg)
+        print(f"→ 저장: {a.out}  ((H,W) uint8 {{0 bg,1 fire,2 water}}) — "
+              f"`merge detect {a.out} --class-id 12 --value 1` 로 벡터화")
+    return 0
+
+
 def _cmd_detect(a: argparse.Namespace) -> int:
     mask = np.load(a.mask)
     try:
         doc = vectorize.vectorize_mask(mask, a.class_id, gsd_m=a.gsd,
-                                       min_area_px=a.min_area, score=a.score)
+                                       min_area_px=a.min_area, score=a.score,
+                                       label_value=a.value)
     except (contract.ContractError, ValueError) as e:
         print(f"✗ 벡터화 실패\n  {e}")
         return 1
@@ -324,10 +343,17 @@ def build_parser() -> argparse.ArgumentParser:
     lb.add_argument("--thr", type=float, default=0.0, help="물 지수 임계(기본 0)")
     lb.add_argument("--out", help="(H,W) uint8 유사라벨 저장")
 
-    dt = sub.add_parser("detect", help="이진 마스크 → 탐지 문서(seg-파생 탐지)")
-    dt.add_argument("mask", help="(H,W) 이진 마스크 npy")
+    sg = sub.add_parser("segment", help="학습 모델로 6밴드 장면 → 재해 클래스맵(추론)")
+    sg.add_argument("scene", help="6밴드 계약 npy")
+    sg.add_argument("--model", required=True, help="train_seg 의 best.pt")
+    sg.add_argument("--out", help="(H,W) uint8 클래스맵 저장")
+
+    dt = sub.add_parser("detect", help="마스크/세그맵 → 탐지 문서(seg-파생 탐지)")
+    dt.add_argument("mask", help="(H,W) 마스크 npy")
     dt.add_argument("--class-id", type=int, required=True, dest="class_id",
                     help=f"탐지 클래스 {contract.DET_MIN_ID}~{contract.DET_MAX_ID}(`merge contract`)")
+    dt.add_argument("--value", type=int, default=None,
+                    help="다중클래스 세그맵에서 이 값인 화소만(예: fire=1). 없으면 nonzero")
     dt.add_argument("--gsd", type=float, default=contract.DEFAULT_GSD_M)
     dt.add_argument("--min-area", type=float, default=vectorize.DEFAULT_MIN_AREA_PX, dest="min_area")
     dt.add_argument("--score", type=float, default=1.0)
@@ -389,6 +415,8 @@ def main(argv=None) -> int:
         return _cmd_dataset(a)
     if a.cmd == "label":
         return _cmd_label(a)
+    if a.cmd == "segment":
+        return _cmd_segment(a)
     if a.cmd == "detect":
         return _cmd_detect(a)
     if a.cmd == "check":

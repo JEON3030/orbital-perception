@@ -47,7 +47,15 @@ python3 -m merge check flood.json --kind det          # seg-파생 탐지가 계
 
 # 1.6) 학습 데이터셋 구축 — 기본 재해 이벤트 취득→유사라벨→타일(npz) + manifest
 python3 -m merge dataset --out-dir data/sat_disaster --tile 256
-#   기본: 울진2022 산불(dNBR) + 낙동 홍수(MNDWI). --events custom.json 로 교체 가능
+#   기본: 울진2022 산불(dNBR) + 소양호 물(MNDWI). --events custom.json 로 교체 가능
+
+# 1.7) 6밴드 재해 세그 모델 학습(작은 UNet, CPU) → best.pt + results.json
+python3 -m merge.train_seg --data data/sat_disaster --out runs/sat_seg --epochs 30
+
+# 1.8) 학습 모델로 추론 → 재해 클래스맵({0 bg,1 fire,2 water}) → seg-파생 탐지
+python3 -m merge segment scene.npy --model runs/sat_seg/best.pt --out seg.npy
+python3 -m merge detect seg.npy --class-id 12 --value 1 --out fire.json   # fire=1→탐지12
+python3 -m merge check fire.json --kind det
 
 # 2) 유휴 전력 → 이 값이 있어야 dynamic(순수) mJ/frame 이 나온다
 python3 -m merge idle

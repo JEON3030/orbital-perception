@@ -298,7 +298,8 @@ def test_acquire_band_hrefs_maps_nir_to_b8a():
     hrefs = acquire.band_hrefs(item)
     assert set(hrefs) == set(contract.BAND_ORDER)
     assert hrefs["nir"]["href"].endswith("nir08.tif")   # 계약 NIR=B8A(nir08)
-    assert hrefs["blue"]["offset"] == -0.1
+    # sentinel-cogs DN 은 baseline 04.00 시프트 미반영 → STAC offset(-0.1) 적용 안 함(신호 뭉갬 방지)
+    assert hrefs["blue"]["offset"] == 0.0
 
 
 def test_acquire_band_hrefs_missing_asset_fails():
@@ -434,3 +435,47 @@ def test_default_events_wellformed():
         assert "post" in ev and len(ev["post"]) == 2
         if ev["kind"] == "burn":
             assert len(ev["pre"]) == 2                   # dNBR 은 pre 필요
+
+
+# ── 6밴드 재해 세그 모델 (학습 스모크·지표) ────────────────────────────────
+def test_tinyunet_forward_shape():
+    import torch
+    from merge import train_seg
+    m = train_seg.TinyUNet(base=8)
+    out = m(torch.zeros(1, contract.N_BANDS, 64, 64))
+    assert out.shape == (1, train_seg.N_CLASSES, 64, 64)
+
+
+def test_train_class_mapping():
+    from merge import train_seg
+    assert train_seg.KIND_TO_CLASS == {"burn": 1, "water": 2}
+    assert train_seg.CLASSES == ("background", "fire", "water")
+
+
+def test_iou_from_cm_perfect_and_half():
+    import torch
+    from merge import train_seg
+    _, miou = train_seg.iou_from_cm(torch.diag(torch.tensor([10, 5, 3])))
+    assert abs(miou - 1.0) < 1e-9
+    cm = torch.tensor([[1, 1, 0], [1, 1, 0], [0, 0, 0]])   # 2클래스 각 IoU 1/3
+    _, miou2 = train_seg.iou_from_cm(cm)
+    assert abs(miou2 - 1 / 3) < 1e-6
+
+
+def test_vectorize_label_value_selects_class():
+    m = np.zeros((20, 20), np.uint8); m[2:8, 2:8] = 1; m[12:18, 12:18] = 2   # fire·water 블록
+    assert len(vectorize.vectorize_mask(m, 12, label_value=1)["detections"]) == 1
+    assert len(vectorize.vectorize_mask(m, 13, label_value=2)["detections"]) == 1
+    assert len(vectorize.vectorize_mask(m, 12)["detections"]) == 2           # nonzero=둘 다
+
+
+def test_predict_mask_shape_and_padding(tmp_path):
+    import torch
+    from merge import train_seg
+    ck = {"state_dict": train_seg.TinyUNet(base=8).state_dict(),
+          "classes": train_seg.CLASSES, "base": 8, "in_ch": contract.N_BANDS}
+    mp = tmp_path / "m.pt"; torch.save(ck, mp)
+    cube = np.full((30, 26, contract.N_BANDS), 0.2, np.float32)   # 8 배수 아님 → 패딩 경로
+    seg, classes = train_seg.predict_mask(cube, str(mp))
+    assert seg.shape == (30, 26) and seg.dtype == np.uint8
+    assert classes == train_seg.CLASSES and int(seg.max()) < len(classes)

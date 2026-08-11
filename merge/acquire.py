@@ -41,6 +41,14 @@ DEFAULT_SCALE = 0.0001    # DN→반사율 기본(=1/10000). STAC 메타가 있�
 DEFAULT_OFFSET = 0.0
 TARGET_GSD_M = 20.0
 
+# ⚠️ 반사율 오프셋 — 경험적 결정(실측 확인 2026-08-11).
+# earth-search 'sentinel-cogs' COG 의 화소 DN 은 baseline 04.00 의 +1000 시프트가 이미
+# 반영돼 있지 **않다**(소양호 장면 green DN 중앙값 346 < 1000). 그런데 STAC raster:bands
+# 메타는 일괄로 offset -0.1(=-1000 DN)을 준다. 이걸 그대로 빼면 실제 신호(특히 물의 낮은
+# green/swir)가 음수→0 으로 뭉개져 MNDWI 물탐지가 6.7%→0.1% 로 무너진다. 그래서 이 소스에서는
+# STAC offset 을 적용하지 않고 scale 만 쓴다(offset 0). DN 은 이미 음수가 없어 clip 도 무해.
+APPLY_STAC_OFFSET = False
+
 
 class AcquireError(RuntimeError):
     """취득 실패(검색 0건·다운로드 오류·밴드 누락 등)."""
@@ -95,21 +103,26 @@ def band_hrefs(item: dict) -> dict[str, dict]:
         out[bkey] = {
             "href": a["href"],
             "scale": float(rb.get("scale", DEFAULT_SCALE)),
-            "offset": float(rb.get("offset", DEFAULT_OFFSET)),
+            # STAC offset 은 이 소스에서 신호를 뭉갠다(위 APPLY_STAC_OFFSET 주석) → 0 사용.
+            "offset": float(rb.get("offset", DEFAULT_OFFSET)) if APPLY_STAC_OFFSET else 0.0,
         }
     return out
 
 
 # ── 네트워크 계층 (fail-loud) ────────────────────────────────────────────
 def search(bbox: tuple[float, float, float, float], start: str, end: str, *,
-           cloud_max: float = 20.0, collection: str = COLLECTION, limit: int = 20) -> list[dict]:
-    """earth-search STAC 검색. bbox=(minlon,minlat,maxlon,maxlat), 날짜 ISO(YYYY-MM-DD)."""
+           cloud_max: float = 20.0, nodata_max: float = 10.0,
+           collection: str = COLLECTION, limit: int = 50) -> list[dict]:
+    """earth-search STAC 검색. bbox=(minlon,minlat,maxlon,maxlat), 날짜 ISO(YYYY-MM-DD).
+    nodata_max: 타일 nodata 비율 상한 — 궤도 가장자리의 '반쪽 장면'(대부분 nodata)을 거른다.
+    이게 없으면 AOI 대부분이 0으로 채워져 유사라벨이 nodata 에 희석된다."""
     import requests
     body = {
         "collections": [collection],
         "bbox": list(bbox),
         "datetime": f"{start}T00:00:00Z/{end}T23:59:59Z",
-        "query": {"eo:cloud_cover": {"lte": cloud_max}},
+        "query": {"eo:cloud_cover": {"lte": cloud_max},
+                  "s2:nodata_pixel_percentage": {"lte": nodata_max}},
         "limit": limit,
     }
     try:
@@ -152,11 +165,17 @@ def warp_band_to_20m(href: str, bbox: tuple[float, float, float, float], utm_eps
         return ds.read(1)
 
 
+def valid_fraction(cube: np.ndarray) -> float:
+    """유효(비-nodata) 화소 비율. nodata 는 전 밴드가 0 인 화소로 본다."""
+    return float((cube != 0).any(axis=-1).mean()) if cube.size else 0.0
+
+
 def acquire_scene(bbox: tuple[float, float, float, float], start: str, end: str, *,
-                  cloud_max: float = 20.0, collection: str = COLLECTION,
-                  out_npy: str | None = None) -> dict:
+                  cloud_max: float = 20.0, nodata_max: float = 10.0,
+                  collection: str = COLLECTION, out_npy: str | None = None) -> dict:
     """AOI·기간으로 가장 맑은 S2 장면을 받아 계약 6밴드 npy 를 만든다. 프로버넌스 dict 반환."""
-    items = search(bbox, start, end, cloud_max=cloud_max, collection=collection)
+    items = search(bbox, start, end, cloud_max=cloud_max, nodata_max=nodata_max,
+                   collection=collection)
     item = pick_least_cloudy(items)
     props = item.get("properties", {})
     utm = props.get("proj:epsg")
@@ -172,9 +191,12 @@ def acquire_scene(bbox: tuple[float, float, float, float], start: str, end: str,
             bands[bkey] = dn_to_reflectance(dn, scale=info["scale"], offset=info["offset"])
 
     cube = stack_to_contract(bands)          # 계약 검증 포함
+    vfrac = valid_fraction(cube)
     meta = {
         "scene_id": item.get("id"), "datetime": props.get("datetime"),
-        "cloud_cover": props.get("eo:cloud_cover"), "proj_epsg": utm,
+        "cloud_cover": props.get("eo:cloud_cover"),
+        "nodata_pct": props.get("s2:nodata_pixel_percentage"),
+        "valid_fraction": round(vfrac, 4), "proj_epsg": utm,
         "bbox_4326": list(bbox), "gsd_m": TARGET_GSD_M,
         "shape": list(cube.shape), "collection": collection,
         "bands": list(contract.BAND_ORDER),
