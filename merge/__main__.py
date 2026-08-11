@@ -11,7 +11,7 @@ import numpy as np
 
 from . import acquire
 from . import adopt as adopt_mod
-from . import contract, meter, score
+from . import contract, labels, meter, score, vectorize
 
 
 def _print_contract() -> None:
@@ -55,6 +55,47 @@ def _cmd_acquire(a: argparse.Namespace) -> int:
           f"밴드 {meta['bands']}")
     if a.out:
         print(f"\n→ 저장: {a.out} (+ .provenance.json)  — `merge check {a.out} --kind in` 로 확인")
+    return 0
+
+
+def _cmd_label(a: argparse.Namespace) -> int:
+    cube = np.load(a.scene)
+    pre = np.load(a.pre) if a.pre else None
+    try:
+        if a.target == "water":
+            mask = labels.pseudo_water(cube, index=a.water_index, thr=a.thr)
+        else:
+            mask = labels.pseudo_burn(cube, pre=pre)
+    except (contract.ContractError, ValueError) as e:
+        print(f"✗ 유사라벨 실패\n  {e}")
+        return 1
+    cov = labels.coverage(mask)
+    kind = ("dNBR(이시기)" if a.target == "burn" and pre is not None
+            else "NBR&NDVI 근사(단시기·약함)" if a.target == "burn"
+            else f"{a.water_index.upper()}>{a.thr:g}")
+    print(f"■ 유사라벨 {a.target}  [{kind}]  커버리지 {cov*100:.2f}%  (⚠ pseudo-label — 진짜 GT 아님)")
+    if a.out:
+        np.save(a.out, mask)
+        print(f"→ 저장: {a.out}  ((H,W) uint8 {{0,1}} — vectorize/학습 정답)")
+    return 0
+
+
+def _cmd_detect(a: argparse.Namespace) -> int:
+    mask = np.load(a.mask)
+    try:
+        doc = vectorize.vectorize_mask(mask, a.class_id, gsd_m=a.gsd,
+                                       min_area_px=a.min_area, score=a.score)
+    except (contract.ContractError, ValueError) as e:
+        print(f"✗ 벡터화 실패\n  {e}")
+        return 1
+    dets = doc["detections"]
+    ko = contract.DET_BY_ID[a.class_id].ko
+    tot_m2 = sum(d.get("area_m2", 0) for d in dets)
+    print(f"■ seg-파생 탐지  {ko}(#{a.class_id}, {doc['vectorize']['geom']})  "
+          f"{len(dets)}건 · 총 {tot_m2/1e6:.3f} km² · 파편버림 {doc['vectorize']['dropped_small']}")
+    if a.out:
+        Path(a.out).write_text(json.dumps(doc, ensure_ascii=False, indent=2))
+        print(f"→ 저장: {a.out}  — `merge check {a.out} --kind det` 로 확인")
     return 0
 
 
@@ -255,6 +296,23 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--collection", default=acquire.COLLECTION)
     q.add_argument("--out", help="6밴드 float32 npy 저장 경로(+.provenance.json)")
 
+    lb = sub.add_parser("label", help="분광지수 유사라벨 생성(재해 학습 정답, 손라벨 없이)")
+    lb.add_argument("scene", help="6밴드 계약 npy(post)")
+    lb.add_argument("--target", choices=["water", "burn"], required=True)
+    lb.add_argument("--pre", help="이전 장면 npy(연소 dNBR 정공법용)")
+    lb.add_argument("--water-index", choices=["mndwi", "ndwi"], default="mndwi", dest="water_index")
+    lb.add_argument("--thr", type=float, default=0.0, help="물 지수 임계(기본 0)")
+    lb.add_argument("--out", help="(H,W) uint8 유사라벨 저장")
+
+    dt = sub.add_parser("detect", help="이진 마스크 → 탐지 문서(seg-파생 탐지)")
+    dt.add_argument("mask", help="(H,W) 이진 마스크 npy")
+    dt.add_argument("--class-id", type=int, required=True, dest="class_id",
+                    help=f"탐지 클래스 {contract.DET_MIN_ID}~{contract.DET_MAX_ID}(`merge contract`)")
+    dt.add_argument("--gsd", type=float, default=contract.DEFAULT_GSD_M)
+    dt.add_argument("--min-area", type=float, default=vectorize.DEFAULT_MIN_AREA_PX, dest="min_area")
+    dt.add_argument("--score", type=float, default=1.0)
+    dt.add_argument("--out", help="탐지 JSON({out_det}) 저장")
+
     c = sub.add_parser("check", help="npy(분할)·JSON(탐지)이 계약에 맞는지 검사")
     c.add_argument("path")
     c.add_argument("--shape", help="예상 크기 H,W (출력·탐지 image_hw 대조용)")
@@ -307,6 +365,10 @@ def main(argv=None) -> int:
         _print_contract(); return 0
     if a.cmd == "acquire":
         return _cmd_acquire(a)
+    if a.cmd == "label":
+        return _cmd_label(a)
+    if a.cmd == "detect":
+        return _cmd_detect(a)
     if a.cmd == "check":
         return _cmd_check(a)
     if a.cmd == "idle":
@@ -438,6 +500,16 @@ def _selftest() -> int:
     expect(acquire.pick_least_cloudy(
         [{"id": "hi", "properties": {"eo:cloud_cover": 40}},
          {"id": "lo", "properties": {"eo:cloud_cover": 2}}])["id"] == "lo", "최소구름 장면 선택")
+
+    print("유사라벨·벡터화 검사 (재해 seg-파생 탐지)")
+    wet = np.full((6, 6, contract.N_BANDS), 0.1, np.float32)
+    wet[..., contract.BAND_ORDER.index("green")] = 0.3
+    wet[..., contract.BAND_ORDER.index("swir1")] = 0.1          # MNDWI=0.5>0
+    expect(labels.coverage(labels.pseudo_water(wet)) == 1.0, "MNDWI>0 → 물 유사라벨")
+    m = np.zeros((20, 20), np.uint8); m[5:15, 5:15] = 1
+    vd = vectorize.vectorize_mask(m, 13)                        # 홍수=폴리곤
+    expect(len(vd["detections"]) == 1 and vd["detections"][0]["geom_type"] == "polygon",
+           "마스크→홍수 폴리곤 탐지(계약 자체통과)")
 
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "o.npy"; np.save(p, good_out)

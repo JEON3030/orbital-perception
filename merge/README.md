@@ -39,6 +39,12 @@ python3 -m merge check scene.npy --kind in            # 입력(6밴드) 검사
 python3 -m merge check 결과.npy --shape 2048,2048     # 출력(분할) 검사
 python3 -m merge check det.json --kind det            # 탐지({out_det}) 검사
 
+# 1.5) 재해 유사라벨 → seg-파생 탐지 (손라벨 없이, 모델 자리엔 유사라벨/모델출력 무엇이든)
+python3 -m merge label scene.npy --target water --out water.npy          # 홍수: MNDWI>0
+python3 -m merge label post.npy --target burn --pre pre.npy --out burn.npy  # 산불: dNBR≥0.27
+python3 -m merge detect water.npy --class-id 13 --min-area 25 --out flood.json  # 물→홍수 폴리곤
+python3 -m merge check flood.json --kind det          # seg-파생 탐지가 계약에 맞는지
+
 # 2) 유휴 전력 → 이 값이 있어야 dynamic(순수) mJ/frame 이 나온다
 python3 -m merge idle
 

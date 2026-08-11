@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from merge import acquire, adopt, contract, score
+from merge import acquire, adopt, contract, labels, score, vectorize
 
 
 # ── 계약 ──────────────────────────────────────────────────────────────
@@ -305,3 +305,94 @@ def test_acquire_band_hrefs_missing_asset_fails():
     item = {"assets": {"blue": {"href": "x"}}}           # 나머지 자산 없음
     with pytest.raises(acquire.AcquireError):
         acquire.band_hrefs(item)
+
+
+# ── 분광지수 유사라벨 (재해 학습 정답) ──────────────────────────────────────
+def _cube(**bands):
+    c = np.full((4, 4, contract.N_BANDS), 0.1, np.float32)
+    for i, name in enumerate(contract.BAND_ORDER):
+        if name in bands:
+            c[..., i] = bands[name]
+    return c
+
+
+def test_spectral_indices_use_contract_bands():
+    c = _cube(green=0.3, red=0.05, nir=0.1, swir1=0.1, swir2=0.3)
+    assert abs(labels.spectral_index(c, "ndwi").mean() - 0.5) < 1e-6      # (g-nir)/(g+nir)
+    assert abs(labels.spectral_index(c, "mndwi").mean() - 0.5) < 1e-6     # (g-swir1)/(g+swir1)
+    assert abs(labels.spectral_index(c, "ndvi").mean() - 1 / 3) < 1e-5    # (nir-red)/(nir+red)
+    assert abs(labels.spectral_index(c, "nbr").mean() - (-0.5)) < 1e-6    # (nir-swir2)/(nir+swir2)
+
+
+def test_spectral_index_safe_divide():
+    c = np.zeros((3, 3, contract.N_BANDS), np.float32)   # 모두 0 → 분모 0 → 0
+    assert np.all(labels.spectral_index(c, "ndwi") == 0.0)
+
+
+def test_pseudo_water_threshold():
+    wet = _cube(green=0.3, swir1=0.1)                     # mndwi=0.5>0 → water
+    assert labels.coverage(labels.pseudo_water(wet)) == 1.0
+    dry = _cube(green=0.1, swir1=0.3)                     # mndwi=-0.5 → not water
+    assert labels.coverage(labels.pseudo_water(dry)) == 0.0
+
+
+def test_pseudo_burn_bitemporal_dnbr():
+    pre = _cube(nir=0.6, swir2=0.2)                       # NBR_pre=0.5
+    post = _cube(nir=0.1, swir2=0.3)                      # NBR_post=-0.5 → dNBR=1.0≥0.27
+    assert labels.coverage(labels.pseudo_burn(post, pre=pre)) == 1.0
+    assert labels.coverage(labels.pseudo_burn(post, pre=post)) == 0.0    # dNBR=0
+
+
+def test_pseudo_burn_monotemporal_approx():
+    burn = _cube(red=0.3, nir=0.1, swir2=0.3)             # NBR=-0.5<0, NDVI=(0.1-0.3)/0.4=-0.5<0.2
+    assert labels.coverage(labels.pseudo_burn(burn)) == 1.0
+
+
+def test_pseudo_burn_pre_shape_mismatch_fails():
+    post = _cube(nir=0.1, swir2=0.3)
+    pre = np.full((3, 3, contract.N_BANDS), 0.2, np.float32)
+    with pytest.raises(ValueError):
+        labels.pseudo_burn(post, pre=pre)
+
+
+# ── seg-파생 탐지 벡터화 ────────────────────────────────────────────────────
+def _rect_mask(h=20, w=20, r0=5, r1=15, c0=5, c1=15):
+    m = np.zeros((h, w), np.uint8); m[r0:r1, c0:c1] = 1
+    return m
+
+
+def test_vectorize_obb_for_ship():
+    doc = vectorize.vectorize_mask(_rect_mask(), 10)     # ship → obb
+    assert contract.validate_detection(doc) is doc
+    assert len(doc["detections"]) == 1
+    d = doc["detections"][0]
+    assert d["geom_type"] == "obb" and d["obb"]["w"] > 0 and d["area_px"] > 4
+
+
+def test_vectorize_polygon_for_flood():
+    doc = vectorize.vectorize_mask(_rect_mask(), 13)     # flood → polygon
+    d = doc["detections"][0]
+    assert d["geom_type"] == "polygon" and len(d["polygon"]) >= 3
+    assert d["area_m2"] == contract.detection_area_m2(d["area_px"], contract.DEFAULT_GSD_M)
+
+
+def test_vectorize_drops_small_fragments():
+    m = np.zeros((20, 20), np.uint8); m[1, 1] = 1        # 1px → area<4
+    doc = vectorize.vectorize_mask(m, 12, min_area_px=4)
+    assert len(doc["detections"]) == 0 and doc["vectorize"]["dropped_small"] == 1
+
+
+def test_vectorize_empty_mask_is_valid_zero():
+    doc = vectorize.vectorize_mask(np.zeros((10, 10), np.uint8), 13)
+    assert doc["detections"] == [] and contract.validate_detection(doc) is doc
+
+
+def test_vectorize_two_objects():
+    m = np.zeros((30, 30), np.uint8); m[3:9, 3:9] = 1; m[20:27, 20:27] = 1
+    doc = vectorize.vectorize_mask(m, 10)
+    assert len(doc["detections"]) == 2
+
+
+def test_vectorize_bad_class_id_rejected():
+    with pytest.raises(ValueError):
+        vectorize.vectorize_mask(_rect_mask(), 3)        # 분할 번호는 탐지 아님
