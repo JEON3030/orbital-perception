@@ -29,8 +29,15 @@ cd ~/orbital-perception
 # 0) 계약을 코드에서 출력 (문서-코드가 어긋날 수 없다)
 python3 -m merge contract
 
-# 1) 낸 결과가 규격에 맞는지 스스로 확인
-python3 -m merge check 결과.npy --shape 2048,2048
+# 0.5) 위성 장면 취득 — S2 20m 6밴드 npy를 계약대로 (STAC+GDAL, 인증 불필요)
+python3 -m merge acquire --bbox 129.02,35.06,129.10,35.12 \
+  --start 2024-02-01 --end 2024-04-30 --cloud 15 --out scene.npy
+#   AOI 창만 range-read + 20m 리샘플. 가장 맑은 장면 자동선택. +scene.provenance.json
+
+# 1) 낸 결과(또는 취득 npy)가 규격에 맞는지 스스로 확인
+python3 -m merge check scene.npy --kind in            # 입력(6밴드) 검사
+python3 -m merge check 결과.npy --shape 2048,2048     # 출력(분할) 검사
+python3 -m merge check det.json --kind det            # 탐지({out_det}) 검사
 
 # 2) 유휴 전력 → 이 값이 있어야 dynamic(순수) mJ/frame 이 나온다
 python3 -m merge idle

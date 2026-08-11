@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from merge import adopt, contract, score
+from merge import acquire, adopt, contract, score
 
 
 # ── 계약 ──────────────────────────────────────────────────────────────
@@ -247,3 +247,61 @@ def test_detection_ids_disjoint_from_seg():
     # 탐지 id 는 분할 0~9 와 절대 안 겹친다(면적표 오염 방지)
     assert set(contract.DET_BY_ID).isdisjoint(set(contract.BY_ID))
     assert min(contract.DET_BY_ID) >= contract.N_CLASSES
+
+
+# ── 취득 순수 핵심 (S2 20m — 네트워크 없이 검증) ────────────────────────────
+def test_acquire_reflectance_scale_offset_and_clip():
+    dn = np.array([[0, 10000], [1000, 5000]], np.uint16)
+    r = acquire.dn_to_reflectance(dn, scale=0.0001, offset=-0.1)   # baseline 04.00
+    assert r.dtype == np.float32
+    assert r[0, 0] == 0.0                       # 0*s-0.1 = -0.1 → clip 0
+    assert abs(r[0, 1] - 0.9) < 1e-6            # 10000*0.0001-0.1
+    assert abs(r[1, 0] - 0.0) < 1e-6            # 1000*0.0001-0.1 = 0
+
+
+def test_acquire_stack_orders_by_contract_and_validates():
+    bands = {b: np.full((4, 4), 0.2, np.float32) for b in contract.BAND_ORDER}
+    cube = acquire.stack_to_contract(bands)
+    assert cube.shape == (4, 4, contract.N_BANDS) and cube.dtype == np.float32
+    contract.validate_input(cube)               # 계약을 통과해야 한다
+
+
+def test_acquire_stack_missing_band_fails():
+    bands = {b: np.zeros((4, 4), np.float32) for b in contract.BAND_ORDER[:-1]}
+    with pytest.raises(acquire.AcquireError):
+        acquire.stack_to_contract(bands)
+
+
+def test_acquire_stack_shape_mismatch_fails():
+    bands = {b: np.zeros((4, 4), np.float32) for b in contract.BAND_ORDER}
+    bands["swir2"] = np.zeros((4, 5), np.float32)
+    with pytest.raises(acquire.AcquireError):
+        acquire.stack_to_contract(bands)
+
+
+def test_acquire_pick_least_cloudy():
+    items = [{"id": "a", "properties": {"eo:cloud_cover": 40}},
+             {"id": "b", "properties": {"eo:cloud_cover": 3}},
+             {"id": "c", "properties": {"eo:cloud_cover": 20}}]
+    assert acquire.pick_least_cloudy(items)["id"] == "b"
+
+
+def test_acquire_pick_empty_fails():
+    with pytest.raises(acquire.AcquireError):
+        acquire.pick_least_cloudy([])
+
+
+def test_acquire_band_hrefs_maps_nir_to_b8a():
+    item = {"assets": {
+        akey: {"href": f"https://x/{akey}.tif", "raster:bands": [{"scale": 0.0001, "offset": -0.1}]}
+        for akey in acquire.ASSET_KEYS.values()}}
+    hrefs = acquire.band_hrefs(item)
+    assert set(hrefs) == set(contract.BAND_ORDER)
+    assert hrefs["nir"]["href"].endswith("nir08.tif")   # 계약 NIR=B8A(nir08)
+    assert hrefs["blue"]["offset"] == -0.1
+
+
+def test_acquire_band_hrefs_missing_asset_fails():
+    item = {"assets": {"blue": {"href": "x"}}}           # 나머지 자산 없음
+    with pytest.raises(acquire.AcquireError):
+        acquire.band_hrefs(item)

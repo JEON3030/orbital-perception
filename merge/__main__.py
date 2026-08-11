@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import acquire
 from . import adopt as adopt_mod
 from . import contract, meter, score
 
@@ -33,6 +34,28 @@ def _print_contract() -> None:
     print(f"  {'번호':<4}{'key':<10}{'한글':<10}{'기하':<9}설명")
     for cid, key, ko, geom, desc in contract.det_class_table_rows():
         print(f"  {cid:<4}{key:<10}{ko:<10}{geom:<9}{desc}")
+
+
+def _cmd_acquire(a: argparse.Namespace) -> int:
+    try:
+        bbox = tuple(float(x) for x in a.bbox.split(","))
+        if len(bbox) != 4:
+            raise ValueError
+    except ValueError:
+        print("✗ --bbox 는 minlon,minlat,maxlon,maxlat 네 수여야 한다.")
+        return 1
+    try:
+        meta = acquire.acquire_scene(bbox, a.start, a.end, cloud_max=a.cloud,
+                                     collection=a.collection, out_npy=a.out)
+    except acquire.AcquireError as e:
+        print(f"✗ 취득 중단\n  {e}")
+        return 1
+    print(f"■ 취득  {meta['scene_id']}  ({meta['datetime']}, 구름 {meta['cloud_cover']}%)")
+    print(f"  격자 {tuple(meta['shape'])} @ {meta['gsd_m']:g}m · UTM EPSG:{meta['proj_epsg']} · "
+          f"밴드 {meta['bands']}")
+    if a.out:
+        print(f"\n→ 저장: {a.out} (+ .provenance.json)  — `merge check {a.out} --kind in` 로 확인")
+    return 0
 
 
 def _cmd_check(a: argparse.Namespace) -> int:
@@ -224,6 +247,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("contract", help="계약(클래스표·밴드·규격)을 코드에서 출력")
 
+    q = sub.add_parser("acquire", help="S2 20m 장면을 받아 계약 6밴드 npy 로 (STAC+GDAL)")
+    q.add_argument("--bbox", required=True, help="minlon,minlat,maxlon,maxlat (EPSG:4326)")
+    q.add_argument("--start", required=True, help="시작일 YYYY-MM-DD")
+    q.add_argument("--end", required=True, help="종료일 YYYY-MM-DD")
+    q.add_argument("--cloud", type=float, default=20.0, help="구름 상한 %% (기본 20)")
+    q.add_argument("--collection", default=acquire.COLLECTION)
+    q.add_argument("--out", help="6밴드 float32 npy 저장 경로(+.provenance.json)")
+
     c = sub.add_parser("check", help="npy(분할)·JSON(탐지)이 계약에 맞는지 검사")
     c.add_argument("path")
     c.add_argument("--shape", help="예상 크기 H,W (출력·탐지 image_hw 대조용)")
@@ -274,6 +305,8 @@ def main(argv=None) -> int:
     a = build_parser().parse_args(argv)
     if a.cmd == "contract":
         _print_contract(); return 0
+    if a.cmd == "acquire":
+        return _cmd_acquire(a)
     if a.cmd == "check":
         return _cmd_check(a)
     if a.cmd == "idle":
@@ -395,6 +428,16 @@ def _selftest() -> int:
             contract.validate_detection(bad); expect(False, f"불량 탐지 거부({why})")
         except contract.ContractError:
             expect(True, f"불량 탐지 거부({why})")
+
+    print("취득 순수코어 검사 (S2 20m — 네트워크 없이)")
+    r = acquire.dn_to_reflectance(np.array([[0, 10000]], np.uint16), scale=0.0001, offset=-0.1)
+    expect(r[0, 0] == 0.0 and abs(r[0, 1] - 0.9) < 1e-6, "DN→반사율 scale/offset+clip(0)")
+    cube = acquire.stack_to_contract({b: np.full((3, 3), 0.2, np.float32)
+                                      for b in contract.BAND_ORDER})
+    expect(cube.shape == (3, 3, contract.N_BANDS), "계약 밴드순 스택 (H,W,6)")
+    expect(acquire.pick_least_cloudy(
+        [{"id": "hi", "properties": {"eo:cloud_cover": 40}},
+         {"id": "lo", "properties": {"eo:cloud_cover": 2}}])["id"] == "lo", "최소구름 장면 선택")
 
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "o.npy"; np.save(p, good_out)
