@@ -1,0 +1,232 @@
+{
+  "device_gpu": "Orin",
+  "device_cpu": "ARM Cortex-A78AE ×6 (Jetson Orin Nano)",
+  "idle_watt": 4.933,
+  "full_tile_mp": 30.1,
+  "note_20m": "S2 20m 풀타일 = 5490² ≈ 30.1MP 가 실제 위성 운영점",
+  "rows": [
+    {
+      "size": 256,
+      "megapixels": 0.066,
+      "cpu": {
+        "frames": 10,
+        "seconds": 4.271,
+        "fps": 2.34,
+        "avg_power_W": 6.252,
+        "peak_power_W": 6.388,
+        "energy_J": 25.333,
+        "mJ_per_frame": 2533.3,
+        "frames_per_joule": 0.395,
+        "samples": 39,
+        "idle_power_W": 4.933,
+        "dynamic_power_W": 1.319,
+        "dynamic_mJ_per_frame": 563.4,
+        "reps": 10,
+        "sec_per_frame": 0.37107
+      },
+      "gpu": {
+        "frames": 117,
+        "seconds": 2.937,
+        "fps": 39.84,
+        "avg_power_W": 7.62,
+        "peak_power_W": 7.923,
+        "energy_J": 21.042,
+        "mJ_per_frame": 179.8,
+        "frames_per_joule": 5.56,
+        "samples": 27,
+        "idle_power_W": 4.933,
+        "dynamic_power_W": 2.687,
+        "dynamic_mJ_per_frame": 67.5,
+        "reps": 117,
+        "sec_per_frame": 0.03415
+      }
+    },
+    {
+      "size": 512,
+      "megapixels": 0.262,
+      "cpu": {
+        "frames": 4,
+        "seconds": 3.716,
+        "fps": 1.08,
+        "avg_power_W": 6.666,
+        "peak_power_W": 6.904,
+        "energy_J": 23.534,
+        "mJ_per_frame": 5883.5,
+        "frames_per_joule": 0.17,
+        "samples": 34,
+        "idle_power_W": 4.933,
+        "dynamic_power_W": 1.733,
+        "dynamic_mJ_per_frame": 1610.0,
+        "reps": 4,
+        "sec_per_frame": 0.87959
+      },
+      "gpu": {
+        "frames": 41,
+        "seconds": 3.9,
+        "fps": 10.51,
+        "avg_power_W": 8.175,
+        "peak_power_W": 8.543,
+        "energy_J": 30.349,
+        "mJ_per_frame": 740.2,
+        "frames_per_joule": 1.351,
+        "samples": 36,
+        "idle_power_W": 4.933,
+        "dynamic_power_W": 3.242,
+        "dynamic_mJ_per_frame": 308.4,
+        "reps": 41,
+        "sec_per_frame": 0.09696
+      }
+    },
+    {
+      "size": 768,
+      "megapixels": 0.59,
+      "cpu": {
+        "frames": 3,
+        "seconds": 6.005,
+        "fps": 0.5,
+        "avg_power_W": 6.756,
+        "peak_power_W": 7.063,
+        "energy_J": 39.081,
+        "mJ_per_frame": 13026.9,
+        "frames_per_joule": 0.077,
+        "samples": 55,
+        "idle_power_W": 4.933,
+        "dynamic_power_W": 1.823,
+        "dynamic_mJ_per_frame": 3649.7,
+        "reps": 3,
+        "sec_per_frame": 1.92013
+      },
+      "gpu": {
+        "frames": 18,
+        "seconds": 3.938,
+        "fps": 4.57,
+        "avg_power_W": 8.186,
+        "peak_power_W": 8.305,
+        "energy_J": 30.397,
+        "mJ_per_frame": 1688.7,
+        "frames_per_joule": 0.592,
+        "samples": 36,
+        "idle_power_W": 4.933,
+        "dynamic_power_W": 3.253,
+        "dynamic_mJ_per_frame": 711.8,
+        "reps": 18,
+        "sec_per_frame": 0.21961
+      }
+    },
+    {
+      "size": 1024,
+      "megapixels": 1.049,
+      "cpu": {
+        "frames": 3,
+        "seconds": 9.698,
+        "fps": 0.31,
+        "avg_power_W": 6.82,
+        "peak_power_W": 7.21,
+        "energy_J": 64.916,
+        "mJ_per_frame": 21638.7,
+        "frames_per_joule": 0.046,
+        "samples": 90,
+        "idle_power_W": 4.933,
+        "dynamic_power_W": 1.887,
+        "dynamic_mJ_per_frame": 6099.9,
+        "reps": 3,
+        "sec_per_frame": 3.2934
+      },
+      "gpu": {
+        "frames": 10,
+        "seconds": 3.79,
+        "fps": 2.64,
+        "avg_power_W": 8.228,
+        "peak_power_W": 8.305,
+        "energy_J": 29.73,
+        "mJ_per_frame": 2973.0,
+        "frames_per_joule": 0.336,
+        "samples": 35,
+        "idle_power_W": 4.933,
+        "dynamic_power_W": 3.296,
+        "dynamic_mJ_per_frame": 1249.0,
+        "reps": 10,
+        "sec_per_frame": 0.38006
+      }
+    },
+    {
+      "size": 1536,
+      "megapixels": 2.359,
+      "cpu": {
+        "frames": 3,
+        "seconds": 27.041,
+        "fps": 0.11,
+        "avg_power_W": 6.679,
+        "peak_power_W": 7.102,
+        "energy_J": 179.346,
+        "mJ_per_frame": 59781.9,
+        "frames_per_joule": 0.017,
+        "samples": 252,
+        "idle_power_W": 4.933,
+        "dynamic_power_W": 1.746,
+        "dynamic_mJ_per_frame": 15739.5,
+        "reps": 3,
+        "sec_per_frame": 13.06968
+      },
+      "gpu": {
+        "frames": 4,
+        "seconds": 3.542,
+        "fps": 1.13,
+        "avg_power_W": 8.202,
+        "peak_power_W": 8.305,
+        "energy_J": 27.887,
+        "mJ_per_frame": 6971.8,
+        "frames_per_joule": 0.143,
+        "samples": 33,
+        "idle_power_W": 4.933,
+        "dynamic_power_W": 3.269,
+        "dynamic_mJ_per_frame": 2894.5,
+        "reps": 4,
+        "sec_per_frame": 0.88471
+      }
+    },
+    {
+      "size": 2048,
+      "megapixels": 4.194,
+      "cpu": {
+        "skipped": ">1536² CPU 생략(수십초/frame)"
+      },
+      "gpu": {
+        "frames": 3,
+        "seconds": 4.821,
+        "fps": 0.62,
+        "avg_power_W": 8.177,
+        "peak_power_W": 8.464,
+        "energy_J": 38.204,
+        "mJ_per_frame": 12734.7,
+        "frames_per_joule": 0.079,
+        "samples": 45,
+        "idle_power_W": 4.933,
+        "dynamic_power_W": 3.244,
+        "dynamic_mJ_per_frame": 5213.6,
+        "reps": 3,
+        "sec_per_frame": 1.60578
+      }
+    },
+    {
+      "size": 2560,
+      "megapixels": 6.554,
+      "cpu": {
+        "skipped": ">1536² CPU 생략(수십초/frame)"
+      },
+      "gpu": {
+        "error": "NVML_SUCCESS == r INTERNAL ASSERT FAILED at \"/opt/pytorch/c10/cuda/CUDACachingAl"
+      }
+    },
+    {
+      "size": 3072,
+      "megapixels": 9.437,
+      "cpu": {
+        "skipped": ">1536² CPU 생략(수십초/frame)"
+      },
+      "gpu": {
+        "error": "NVML_SUCCESS == r INTERNAL ASSERT FAILED at \"/opt/pytorch/c10/cuda/CUDACachingAl"
+      }
+    }
+  ]
+}

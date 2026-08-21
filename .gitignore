@@ -30,3 +30,10 @@ webviz_url.txt
 
 # merge 웹 데모 런타임 산출물(렌더 png·취득 scene·로그) — 재생성 가능
 _webdemo/
+
+# 전력대결 산출물은 버전관리(결과·그래프·PPT). 로그/PDF는 제외
+!outputs/power_duel/
+outputs/power_duel/*
+!outputs/power_duel/results.json
+!outputs/power_duel/power_duel.png
+!outputs/power_duel/*.pptx
