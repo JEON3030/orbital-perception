@@ -176,26 +176,44 @@ def train(data_dir: str, out_dir: str, *, epochs=20, batch=2, lr=1e-3,
     return result
 
 
+def resolve_device(device: str | None = None) -> torch.device:
+    """추론 디바이스 결정. None/"auto"→GPU 있으면 cuda 아니면 cpu.
+    "cuda" 를 명시했는데 GPU 가 없으면 조용히 CPU 로 안 내려가고 멈춘다(fail-loud)."""
+    want = (device or "auto").lower()
+    if want == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if want == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--device cuda 를 요구했으나 CUDA 를 못 찾았다 "
+                           "(torch.cuda.is_available()=False). CPU 로 조용히 안 내려간다.")
+    return torch.device(want)
+
+
 @torch.no_grad()
-def load_model(model_path: str):
-    """저장된 체크포인트에서 모델·클래스명을 복원한다(CPU)."""
+def load_model(model_path: str, device: torch.device | str = "cpu"):
+    """저장된 체크포인트에서 모델·클래스명을 복원해 device 로 올린다."""
     ck = torch.load(model_path, map_location="cpu", weights_only=False)
     m = TinyUNet(in_ch=ck["in_ch"], n_classes=len(ck["classes"]), base=ck["base"])
     m.load_state_dict(ck["state_dict"]); m.eval()
-    return m, ck["classes"]
+    return m.to(device), ck["classes"]
 
 
 @torch.no_grad()
-def predict_mask(cube: np.ndarray, model_path: str, *, mult: int = 8):
+def predict_mask(cube: np.ndarray, model_path: str, *, mult: int = 8,
+                 device: str | None = None):
     """계약 6밴드 큐브 → 재해 클래스맵 (H,W) uint8 {0 bg,1 fire,2 water}. 클래스명도 반환.
+    device: None/"auto"→GPU 우선, "cuda"/"cpu" 로 강제 가능(위성 전력대결·배포용).
     UNet 풀링 때문에 H,W 를 mult 배수로 패딩 후 원크기로 자른다."""
     cube = contract.validate_input(cube)
     H, W = cube.shape[:2]
     ph, pw = (-H) % mult, (-W) % mult
     x = np.pad(cube, ((0, ph), (0, pw), (0, 0)), mode="reflect")
-    m, classes = load_model(model_path)
-    t = torch.from_numpy(np.ascontiguousarray(x.transpose(2, 0, 1)[None], np.float32))
-    pred = m(t).argmax(1)[0].numpy().astype(np.uint8)
+    dev = resolve_device(device)
+    m, classes = load_model(model_path, dev)
+    t = torch.from_numpy(np.ascontiguousarray(x.transpose(2, 0, 1)[None], np.float32)).to(dev)
+    logits = m(t)
+    if dev.type == "cuda":
+        torch.cuda.synchronize()          # 계측이 실제 GPU 완료시각을 재도록
+    pred = logits.argmax(1)[0].to("cpu").numpy().astype(np.uint8)
     return pred[:H, :W], classes
 
 

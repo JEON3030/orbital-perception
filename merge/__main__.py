@@ -99,12 +99,13 @@ def _cmd_segment(a: argparse.Namespace) -> int:
     from . import train_seg
     cube = np.load(a.scene)
     try:
-        seg, classes = train_seg.predict_mask(cube, a.model)
-    except (contract.ContractError, FileNotFoundError) as e:
+        dev = train_seg.resolve_device(getattr(a, "device", "auto"))
+        seg, classes = train_seg.predict_mask(cube, a.model, device=str(dev))
+    except (contract.ContractError, FileNotFoundError, RuntimeError) as e:
         print(f"✗ 세그 추론 실패\n  {e}")
         return 1
     frac = {classes[c]: round(float((seg == c).mean()) * 100, 2) for c in range(len(classes))}
-    print(f"■ 재해 세그  {seg.shape}  클래스비율%: {frac}")
+    print(f"■ 재해 세그  {seg.shape}  [{dev}]  클래스비율%: {frac}")
     if a.out:
         np.save(a.out, seg)
         print(f"→ 저장: {a.out}  ((H,W) uint8 {{0 bg,1 fire,2 water}}) — "
@@ -347,6 +348,8 @@ def build_parser() -> argparse.ArgumentParser:
     sg.add_argument("scene", help="6밴드 계약 npy")
     sg.add_argument("--model", required=True, help="train_seg 의 best.pt")
     sg.add_argument("--out", help="(H,W) uint8 클래스맵 저장")
+    sg.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto",
+                    help="추론 디바이스 (기본 auto=GPU 우선). cuda 강제 시 GPU 없으면 중단")
 
     dt = sub.add_parser("detect", help="마스크/세그맵 → 탐지 문서(seg-파생 탐지)")
     dt.add_argument("mask", help="(H,W) 마스크 npy")

@@ -27,3 +27,6 @@ outputs/trt_compare/*
 webviz_service.log
 webviz_keeper.log
 webviz_url.txt
+
+# merge 웹 데모 런타임 산출물(렌더 png·취득 scene·로그) — 재생성 가능
+_webdemo/
