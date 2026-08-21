@@ -35,5 +35,3 @@ _webdemo/
 !outputs/power_duel/
 outputs/power_duel/*
 !outputs/power_duel/results.json
-!outputs/power_duel/power_duel.png
-!outputs/power_duel/*.pptx
